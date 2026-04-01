@@ -1,5 +1,5 @@
-use crate::terminal::Terminal;
 use crate::AppEvent;
+use crate::terminal::Terminal;
 use ratatui::layout::Rect;
 use std::sync::mpsc::Sender;
 
@@ -27,7 +27,7 @@ impl Window {
         let rows = rect.height.saturating_sub(2);
         let cols = rect.width.saturating_sub(2);
         let terminal = Terminal::new(rows, cols, event_tx, command.clone(), args.clone())?;
-        
+
         Ok(Self {
             title,
             rect,

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -19,7 +19,13 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new(rows: u16, cols: u16, event_tx: Sender<AppEvent>, command: Option<String>, args: Vec<String>) -> Result<Self> {
+    pub fn new(
+        rows: u16,
+        cols: u16,
+        event_tx: Sender<AppEvent>,
+        command: Option<String>,
+        args: Vec<String>,
+    ) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system.openpty(PtySize {
             rows,
@@ -44,7 +50,7 @@ impl Terminal {
         if !cfg!(target_os = "windows") {
             cmd.env("TERM", "xterm-256color");
         }
-        
+
         let mut child = pair.slave.spawn_command(cmd)?;
 
         let reader = pair.master.try_clone_reader()?;
@@ -52,10 +58,10 @@ impl Terminal {
 
         let parser = Arc::new(Mutex::new(Parser::new(rows, cols, 3000)));
         let parser_clone = parser.clone();
-        
+
         let running = Arc::new(AtomicBool::new(true));
         let running_clone = running.clone();
-        
+
         let exit_code = Arc::new(Mutex::new(None));
         let exit_code_clone = exit_code.clone();
 
@@ -91,9 +97,9 @@ impl Terminal {
             let _ = tx_wait.send(AppEvent::TerminalUpdate);
         });
 
-        Ok(Self { 
-            parser, 
-            master: pair.master, 
+        Ok(Self {
+            parser,
+            master: pair.master,
             writer,
             running,
             exit_code,

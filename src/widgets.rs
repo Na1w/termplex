@@ -4,9 +4,9 @@ use ratatui::{
     style::{Color, Modifier, Style},
     widgets::Widget,
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use vt100::Parser;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct TerminalWidget {
     pub parser: Arc<Mutex<Parser>>,
@@ -19,7 +19,7 @@ impl Widget for TerminalWidget {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let is_running = self.running.load(Ordering::SeqCst);
         let mut parser = self.parser.lock().unwrap();
-        
+
         parser.screen_mut().set_scrollback(self.scroll_offset);
         let screen = parser.screen();
 
@@ -36,9 +36,9 @@ impl Widget for TerminalWidget {
                     if symbol.is_empty() {
                         symbol = " ";
                     }
-                    
+
                     let mut style = Style::default().bg(Color::Black).fg(Color::Gray);
-                    
+
                     let fg = convert_color(cell.fgcolor());
                     if fg != Color::Reset {
                         style = style.fg(fg);
@@ -47,7 +47,7 @@ impl Widget for TerminalWidget {
                     if bg != Color::Reset {
                         style = style.bg(bg);
                     }
-                    
+
                     if cell.bold() {
                         style = style.add_modifier(Modifier::BOLD);
                     }
@@ -61,25 +61,30 @@ impl Widget for TerminalWidget {
                     buf[(x, y)].set_symbol(symbol).set_style(style);
                 } else {
                     // Fill with background spaces if beyond vt100 bounds
-                    buf[(x, y)].set_symbol(" ").set_style(Style::default().bg(Color::Black));
+                    buf[(x, y)]
+                        .set_symbol(" ")
+                        .set_style(Style::default().bg(Color::Black));
                 }
             }
         }
-        
+
         // Show exit status overlay
         if !is_running {
             let code = *self.exit_code.lock().unwrap();
             let msg = format!(" [ PROCESS EXITED WITH CODE {:?} ] ", code.unwrap_or(0));
             let x = area.x + (area.width.saturating_sub(msg.len() as u16) / 2);
             let y = area.y + (area.height / 2);
-            
+
             if y < area.bottom() {
                 for (i, c) in msg.chars().enumerate() {
                     let cx = x + i as u16;
                     if cx < area.right() {
-                        buf[(cx, y)]
-                            .set_char(c)
-                            .set_style(Style::default().fg(Color::White).bg(Color::Red).add_modifier(Modifier::BOLD));
+                        buf[(cx, y)].set_char(c).set_style(
+                            Style::default()
+                                .fg(Color::White)
+                                .bg(Color::Red)
+                                .add_modifier(Modifier::BOLD),
+                        );
                     }
                 }
             }
