@@ -1,0 +1,247 @@
+use serde::{Deserialize, Serialize};
+
+/// Messages sent from Client to Server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ClientMessage {
+    /// Initial connection with client info
+    Connect {
+        /// Terminal size at connection time
+        term_size: (u16, u16),
+    },
+
+    /// Keyboard/mouse input for a specific window
+    Input { window_id: usize, data: Vec<u8> },
+
+    /// Request to create a new terminal window
+    CreateWindow {
+        x: u16,
+        y: u16,
+        width: u16,
+        height: u16,
+        command: Option<String>,
+        args: Vec<String>,
+    },
+
+    /// Request to close a window
+    CloseWindow { window_id: usize },
+
+    /// Focus a specific window
+    FocusWindow { window_id: usize },
+
+    /// Resize a window
+    ResizeWindow {
+        window_id: usize,
+        width: u16,
+        height: u16,
+    },
+
+    /// Move a window
+    MoveWindow { window_id: usize, x: u16, y: u16 },
+
+    /// Toggle minimize on a window
+    MinimizeWindow { window_id: usize },
+
+    /// Toggle maximize on a window
+    MaximizeWindow { window_id: usize },
+
+    /// Toggle true fullscreen on a window
+    ToggleFullscreen { window_id: usize },
+
+    /// Client terminal resized
+    TerminalResize { width: u16, height: u16 },
+
+    /// Scroll request
+    Scroll { window_id: usize, amount: i32 },
+
+    /// Request layout save
+    SaveLayout { path: String },
+
+    /// Request layout load
+    LoadLayout { path: String },
+
+    /// Capture pane content
+    CapturePane { window_id: usize },
+
+    /// Capture full desktop content
+    CaptureFull,
+
+    /// Client disconnecting
+    Disconnect,
+}
+
+/// Configuration for a single window in a layout
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowConfig {
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub command: Option<String>,
+    pub args: Vec<String>,
+    pub title: String,
+}
+
+/// A complete layout of windows
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct Layout {
+    pub windows: Vec<WindowConfig>,
+}
+
+/// A single cell in the terminal screen
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct Cell {
+    pub ch: char,
+    pub fg: (u8, u8, u8),
+    pub bg: (u8, u8, u8),
+    pub attrs: u8, // bit 0: bold, 1: italic, 2: underline
+}
+
+impl Cell {
+    pub fn bold(&self) -> bool {
+        self.attrs & 1 != 0
+    }
+    pub fn italic(&self) -> bool {
+        self.attrs & 2 != 0
+    }
+    pub fn underline(&self) -> bool {
+        self.attrs & 4 != 0
+    }
+
+    pub fn new(
+        ch: char,
+        fg: (u8, u8, u8),
+        bg: (u8, u8, u8),
+        bold: bool,
+        italic: bool,
+        underline: bool,
+    ) -> Self {
+        let mut attrs = 0;
+        if bold {
+            attrs |= 1;
+        }
+        if italic {
+            attrs |= 2;
+        }
+        if underline {
+            attrs |= 4;
+        }
+        Self { ch, fg, bg, attrs }
+    }
+}
+
+impl Default for Cell {
+    fn default() -> Self {
+        Self {
+            ch: ' ',
+            fg: (200, 200, 200),
+            bg: (0, 0, 0),
+            attrs: 0,
+        }
+    }
+}
+
+/// Window state sent from server
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WindowState {
+    pub id: usize,
+    pub title: String,
+    pub x: u16,
+    pub y: u16,
+    pub width: u16,
+    pub height: u16,
+    pub minimized: bool,
+    pub focused: bool,
+    pub running: bool,
+    pub exit_code: Option<i32>,
+    pub scroll_offset: usize,
+    /// Screen content - flat 1D grid of cells (row-major)
+    pub screen: Vec<Cell>,
+    /// Cursor position (row, col)
+    pub cursor_pos: Option<(u16, u16)>,
+    /// Cursor visible
+    pub cursor_visible: bool,
+    /// Mouse reporting enabled by the application
+    pub mouse_reporting: bool,
+    /// Z-order position (0 = back, higher = front)
+    pub z_order: usize,
+}
+
+/// Messages sent from Server to Client
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ServerMessage {
+    /// Connection established, sent current state
+    Welcome {
+        /// Client session ID
+        session_id: u64,
+        /// Current windows
+        windows: Vec<WindowState>,
+    },
+
+    /// Full state sync (all windows)
+    FullSync { windows: Vec<WindowState> },
+
+    /// Single window updated
+    WindowUpdate { window: WindowState },
+
+    /// Window closed
+    WindowClosed { window_id: usize },
+
+    /// New window created
+    WindowCreated { window: WindowState },
+
+    /// Sparse screen update (only changed cells)
+    ScreenDiff {
+        window_id: usize,
+        /// List of (index, cell) for changed cells
+        cells: Vec<(usize, Cell)>,
+        /// New cursor position
+        cursor_pos: Option<(u16, u16)>,
+    },
+
+    /// Pane captured content
+    PaneCaptured { window_id: usize, text: String },
+
+    /// Full desktop captured content
+    FullCaptured { text: String },
+
+    /// Error message
+    Error { message: String },
+
+    /// Layout saved confirmation
+    LayoutSaved,
+
+    /// Server shutting down
+    Shutdown,
+}
+
+/// Wraps a message with length prefix for TCP framing
+pub fn encode_message<T: Serialize>(msg: &T) -> anyhow::Result<Vec<u8>> {
+    let encoded = bincode::serialize(msg)?;
+    let len = encoded.len() as u32;
+    let mut result = Vec::with_capacity(4 + encoded.len());
+    result.extend_from_slice(&len.to_be_bytes());
+    result.extend_from_slice(&encoded);
+    Ok(result)
+}
+
+/// Parse length-prefixed message from buffer
+#[allow(dead_code)]
+pub fn decode_message<T: for<'de> Deserialize<'de>>(buf: &[u8]) -> anyhow::Result<(T, usize)> {
+    if buf.len() < 4 {
+        anyhow::bail!("Buffer too small for length prefix");
+    }
+    let len = u32::from_be_bytes([buf[0], buf[1], buf[2], buf[3]]) as usize;
+    if buf.len() < 4 + len {
+        anyhow::bail!("Buffer too small for message");
+    }
+    let msg: T = bincode::deserialize(&buf[4..4 + len])?;
+    Ok((msg, 4 + len))
+}
+
+/// Default TCP port for termplex
+#[allow(dead_code)]
+pub const DEFAULT_PORT: u16 = 9876;
+
+/// Default bind address (localhost only)
+#[allow(dead_code)]
+pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1";

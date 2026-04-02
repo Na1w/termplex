@@ -1,6 +1,18 @@
 # TermPlex
 
-TermPlex is a lightweight TUI window manager that allows you to run and manage multiple terminal sessions within a single window. It features draggable, resizable windows, persistent layouts, and two distinct modes for seamless terminal use and workspace management.
+> **⚠️ TermPlex is an experiment in VIBECODING.**
+> This project is based on an idea for a terminal multiplexer and was built by following the "vibe" rather than traditional development processes.
+
+TermPlex is a TUI window manager and terminal multiplexer using a client-server architecture. It allows managing multiple terminal sessions within a single window.
+
+## Features
+
+- **Event-driven**: Uses screen diffing and flattened buffers to keep CPU usage low.
+- **Client-Server**: Disconnect and reconnect to sessions. Multiple clients can share the same session.
+- **Layouts**: Save and restore window arrangements and running processes.
+- **Modes**: Separate Desktop and Terminal modes for workspace management.
+- **Mouse Support**: SGR mouse reporting for applications, with window dragging and resizing.
+- **Snapshots**: Capture individual panes or the full session as plain text via CLI or shortcuts.
 
 ## Keybindings
 
@@ -8,29 +20,35 @@ TermPlex is a lightweight TUI window manager that allows you to run and manage m
 - **`F12`**: Toggle between **Terminal Mode** and **Desktop Mode**.
 
 ### Terminal Mode (Default)
-In this mode, input is sent directly to the active terminal.
-- **`Shift + PageUp/Down`**: Scroll through terminal history.
-- **`Ctrl + Right Click`**: Spawn a new terminal at the mouse cursor.
+In this mode, input is sent to the active terminal.
+- **`Shift + PageUp/Down`**: Scroll through TermPlex history.
+- **`Ctrl + Scroll Wheel`**: Send scroll events to the application.
+- **`Ctrl + Right Click`**: Create a new terminal at the mouse cursor.
+- **`Ctrl + Drag`**: Move or resize windows.
 
 ### Desktop Mode
-In this mode, keys are used for window management.
-- **`Tab` / `Shift + Tab`**: Cycle through window focus.
-- **`Arrow Keys`**: Move the active window.
+In this mode, single-key commands manage the workspace.
+- **`Tab` / `Shift + Tab`**: Cycle focus.
+- **`Arrow Keys`**: Move window.
 - **`W` / `S`**: Resize height.
 - **`A` / `D`**: Resize width.
-- **`Z`**: Close window.
-- **`X`**: Maximize/Restore.
-- **`C`**: Minimize/Unminimize.
-- **`P`**: Save current layout to `layout.json`.
-- **`Ctrl + N`**: Spawn a new terminal.
-- **`Ctrl + Q`**: Quit TermPlex.
+- **`z`**: Close window.
+- **`x`**: Minimize (collapses to title bar).
+- **`c`**: Maximize (expands to neighbors).
+- **`f`**: Toggle Fullscreen.
+- **`n`**: New window.
+- **`s`**: Save layout to `layout.json`.
+- **`l`**: Load layout from `layout.json`.
+- **`v`**: Capture active pane.
+- **`p`**: Capture full desktop.
+- **`q`**: Quit.
 
 ## Mouse Controls
 
-- **Titlebar Drag**: Move the window.
-- **Bottom-Right Handle (◢)**: Resize the window.
-- **[X] [^] [_] Buttons**: Close, Maximize/Restore, and Minimize.
-- **Scroll Wheel**: Scroll through terminal buffers.
+- **Titlebar Drag**: Move window.
+- **Bottom-Right Handle (◢)**: Resize window.
+- **[X] [_] [^] ...... [F]**: Window control buttons.
+- **Scroll Wheel**: Scroll terminal buffers.
 
 ## Usage
 
@@ -44,20 +62,17 @@ cargo build --release
 ./target/release/termplex [layout.json]
 ```
 
-## Configuration
+### CLI Capture
+```bash
+# Capture full desktop
+termplex capture
 
-Layouts are stored in JSON format (e.g., `layout.json`):
+# Capture a specific window
+termplex capture --window-id 1
+```
 
-```json
-{
-  "windows": [
-    {
-      "title": "Terminal 1",
-      "rect": [1, 1, 80, 24],
-      "minimized": false,
-      "command": "/bin/bash",
-      "args": ["-c", "ls ; exec bash"]
-    }
-  ]
-}
+## CLI
+Run with `--help` to see available options:
+```bash
+termplex --help
 ```
