@@ -1,8 +1,8 @@
-use crate::AppEvent;
-use crate::terminal::Terminal;
+use crate::terminal::{TermEvent, Terminal};
 use ratatui::layout::Rect;
 use std::sync::mpsc::Sender;
 
+#[allow(dead_code)]
 pub struct Window {
     pub title: String,
     pub rect: Rect,
@@ -15,12 +15,13 @@ pub struct Window {
     pub scroll_offset: usize,
 }
 
+#[allow(dead_code)]
 impl Window {
     pub fn new(
         _id: usize,
         title: String,
         rect: Rect,
-        event_tx: Sender<AppEvent>,
+        event_tx: Sender<TermEvent>,
         command: Option<String>,
         args: Vec<String>,
     ) -> anyhow::Result<Self> {
