@@ -42,7 +42,15 @@ struct WindowInfo {
     scroll_offset: usize,
     terminal: Terminal,
     last_screen: Vec<Cell>,
+    last_cursor_pos: Option<(u16, u16)>,
     fullscreen: bool,
+}
+
+impl WindowInfo {
+    fn update_last_state(&mut self, ws: &WindowState) {
+        self.last_screen = ws.screen.clone();
+        self.last_cursor_pos = ws.cursor_pos;
+    }
 }
 
 struct ServerState {
@@ -103,6 +111,7 @@ impl ServerState {
             scroll_offset: 0,
             terminal,
             last_screen: Vec::new(),
+            last_cursor_pos: None,
             fullscreen: false,
         };
 
@@ -837,7 +846,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 let new_ws = build_window_state(win, &window_order);
 
                                 if win.last_screen.len() != new_ws.screen.len() {
-                                    win.last_screen = new_ws.screen.clone();
+                                    win.update_last_state(&new_ws);
                                     Some(ServerMessage::WindowUpdate { window: new_ws })
                                 } else {
                                     let mut diff_cells = Vec::new();
@@ -848,8 +857,11 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                             diff_cells.push((idx, *new));
                                         }
                                     }
+                                    let cursor_changed = win.last_cursor_pos != new_ws.cursor_pos;
                                     win.last_screen = new_ws.screen;
-                                    if !diff_cells.is_empty() {
+                                    win.last_cursor_pos = new_ws.cursor_pos;
+
+                                    if !diff_cells.is_empty() || cursor_changed {
                                         Some(ServerMessage::ScreenDiff {
                                             window_id,
                                             cells: diff_cells,
@@ -883,7 +895,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     .resize(height.saturating_sub(2), width.saturating_sub(2));
                                 win.rect = new_rect;
                                 let new_ws = build_window_state(win, &window_order);
-                                win.last_screen = new_ws.screen.clone();
+                                win.update_last_state(&new_ws);
                                 Some(new_ws)
                             } else {
                                 None
@@ -903,7 +915,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 win.rect.x = x;
                                 win.rect.y = y;
                                 let new_ws = build_window_state(win, &window_order);
-                                win.last_screen = new_ws.screen.clone();
+                                win.update_last_state(&new_ws);
                                 Some(new_ws)
                             } else {
                                 None
@@ -922,7 +934,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             if let Some(win) = st.windows.get_mut(&window_id) {
                                 win.minimized = !win.minimized;
                                 let new_ws = build_window_state(win, &window_order);
-                                win.last_screen = new_ws.screen.clone();
+                                win.update_last_state(&new_ws);
                                 Some(new_ws)
                             } else {
                                 None
@@ -967,7 +979,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     );
                                 }
                                 let new_ws = build_window_state(win, &window_order);
-                                win.last_screen = new_ws.screen.clone();
+                                win.update_last_state(&new_ws);
                                 Some(new_ws)
                             } else {
                                 None
@@ -1065,7 +1077,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     );
                                 }
                                 let new_ws = build_window_state(win, &window_order);
-                                win.last_screen = new_ws.screen.clone();
+                                win.update_last_state(&new_ws);
                                 Some(new_ws)
                             } else {
                                 None
@@ -1095,7 +1107,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 let new_ws = build_window_state(win, &window_order);
 
                                 if win.last_screen.len() != new_ws.screen.len() {
-                                    win.last_screen = new_ws.screen.clone();
+                                    win.update_last_state(&new_ws);
                                     Some(ServerMessage::WindowUpdate { window: new_ws })
                                 } else {
                                     let mut diff_cells = Vec::new();
@@ -1106,8 +1118,11 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                             diff_cells.push((idx, *new));
                                         }
                                     }
+                                    let cursor_changed = win.last_cursor_pos != new_ws.cursor_pos;
                                     win.last_screen = new_ws.screen;
-                                    if !diff_cells.is_empty() {
+                                    win.last_cursor_pos = new_ws.cursor_pos;
+
+                                    if !diff_cells.is_empty() || cursor_changed {
                                         Some(ServerMessage::ScreenDiff {
                                             window_id,
                                             cells: diff_cells,
@@ -1137,7 +1152,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                         // If screens have different sizes, we must send a full update
                         if win.last_screen.len() != new_ws.screen.len() {
-                            win.last_screen = new_ws.screen.clone();
+                            win.update_last_state(&new_ws);
                             Some(ServerMessage::WindowUpdate { window: new_ws })
                         } else {
                             // Find differences
@@ -1151,9 +1166,11 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             }
 
                             // Update last_screen
+                            let cursor_changed = win.last_cursor_pos != new_ws.cursor_pos;
                             win.last_screen = new_ws.screen;
+                            win.last_cursor_pos = new_ws.cursor_pos;
 
-                            if !diff_cells.is_empty() {
+                            if !diff_cells.is_empty() || cursor_changed {
                                 Some(ServerMessage::ScreenDiff {
                                     window_id,
                                     cells: diff_cells,
