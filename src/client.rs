@@ -53,6 +53,7 @@ struct Client {
     mode: Mode,
     drag_state: Option<DragState>,
     last_screen_size: Rect,
+    last_mouse_pos: (u16, u16),
     server_tx: mpsc::Sender<ClientMessage>,
 }
 
@@ -64,8 +65,33 @@ impl Client {
             mode: Mode::Terminal,
             drag_state: None,
             last_screen_size: screen_size,
+            last_mouse_pos: (0, 0),
             server_tx,
         }
+    }
+
+    fn get_window_at(&self, x: u16, y: u16) -> Option<(usize, bool)> {
+        // Sort by z-order (front to back)
+        let mut windows_with_z: Vec<_> = self.windows.values().collect();
+        windows_with_z.sort_by(|a, b| b.z_order.cmp(&a.z_order));
+
+        for win in windows_with_z {
+            let rect = if win.minimized {
+                Rect::new(win.x, win.y, win.width, 1)
+            } else {
+                Rect::new(win.x, win.y, win.width, win.height)
+            };
+
+            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
+                let is_terminal_area = !win.minimized
+                    && x > win.x
+                    && x < win.x + win.width - 1
+                    && y > win.y
+                    && y < win.y + win.height - 1;
+                return Some((win.id, is_terminal_area));
+            }
+        }
+        None
     }
 
     fn handle_event(&mut self, event: AppEvent) -> Result<bool> {
@@ -83,7 +109,17 @@ impl Client {
                     if key.kind != event::KeyEventKind::Press {
                         return Ok(false);
                     }
+
+                    // Hover-based redirection:
+                    // If mouse is inside ANY window's terminal area (excluding borders),
+                    // send ALL keys directly to that window unconditionally.
+                    let (mx, my) = self.last_mouse_pos;
+                    if let Some((id, true)) = self.get_window_at(mx, my) {
+                        return self.send_key_to_window(id, key);
+                    }
+
                     if key.code == KeyCode::F(12) {
+                        // Toggle mode normally
                         self.mode = if self.mode == Mode::Terminal {
                             Mode::Desktop
                         } else {
@@ -92,7 +128,10 @@ impl Client {
                     } else if self.mode == Mode::Desktop {
                         return self.handle_desktop_key(key);
                     } else {
-                        return self.handle_terminal_key(key);
+                        // Default to active window if not hovering over anything specific
+                        if let Some(id) = self.active_window_id {
+                            return self.send_key_to_window(id, key);
+                        }
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -365,100 +404,102 @@ impl Client {
         Ok(false)
     }
 
-    fn handle_terminal_key(&mut self, key: KeyEvent) -> Result<bool> {
-        if let Some(id) = self.active_window_id {
-            let mut data = Vec::new();
+    fn send_key_to_window(&mut self, id: usize, key: KeyEvent) -> Result<bool> {
+        let mut data = Vec::new();
 
-            // Handle scroll keys
-            match (key.modifiers, key.code) {
-                (KeyModifiers::SHIFT, KeyCode::PageUp) => {
-                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                        window_id: id,
-                        amount: 10,
-                    });
-                    return Ok(false);
-                }
-                (KeyModifiers::SHIFT, KeyCode::PageDown) => {
-                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                        window_id: id,
-                        amount: -10,
-                    });
-                    return Ok(false);
-                }
-                _ => {}
+        // Handle scroll keys
+        match (key.modifiers, key.code) {
+            (KeyModifiers::SHIFT, KeyCode::PageUp) => {
+                let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                    window_id: id,
+                    amount: 10,
+                });
+                return Ok(false);
             }
-
-            // Convert key to bytes
-            if key.modifiers.contains(KeyModifiers::ALT) {
-                data.push(27);
+            (KeyModifiers::SHIFT, KeyCode::PageDown) => {
+                let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                    window_id: id,
+                    amount: -10,
+                });
+                return Ok(false);
             }
+            _ => {}
+        }
 
-            match key.code {
-                KeyCode::Char(c) => {
-                    if key.modifiers.contains(KeyModifiers::CONTROL) {
-                        if c.is_ascii_lowercase() {
-                            data.push((c as u8) - b'a' + 1);
-                        } else if c.is_ascii_uppercase() {
-                            data.push((c as u8) - b'A' + 1);
-                        } else {
-                            match c {
-                                '[' => data.push(27),
-                                '\\' => data.push(28),
-                                ']' => data.push(29),
-                                '^' => data.push(30),
-                                '_' => data.push(31),
-                                ' ' => data.push(0),
-                                _ => {
-                                    let mut buf = [0u8; 4];
-                                    data.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
-                                }
+        // Convert key to bytes
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            data.push(27);
+        }
+
+        match key.code {
+            KeyCode::Char(c) => {
+                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                    if c.is_ascii_lowercase() {
+                        data.push((c as u8) - b'a' + 1);
+                    } else if c.is_ascii_uppercase() {
+                        data.push((c as u8) - b'A' + 1);
+                    } else {
+                        match c {
+                            '[' => data.push(27),
+                            '\\' => data.push(28),
+                            ']' => data.push(29),
+                            '^' => data.push(30),
+                            '_' => data.push(31),
+                            ' ' => data.push(0),
+                            _ => {
+                                let mut buf = [0u8; 4];
+                                data.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                             }
                         }
-                    } else {
-                        let mut buf = [0u8; 4];
-                        data.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                     }
+                } else {
+                    let mut buf = [0u8; 4];
+                    data.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                 }
-                KeyCode::Enter => data.push(b'\r'),
-                KeyCode::Backspace => data.push(127),
-                KeyCode::Tab => data.push(9),
-                KeyCode::Esc => data.push(27),
-                KeyCode::Up => data.extend_from_slice(b"\x1b[A"),
-                KeyCode::Down => data.extend_from_slice(b"\x1b[B"),
-                KeyCode::Right => data.extend_from_slice(b"\x1b[C"),
-                KeyCode::Left => data.extend_from_slice(b"\x1b[D"),
-                KeyCode::Home => data.extend_from_slice(b"\x1b[H"),
-                KeyCode::End => data.extend_from_slice(b"\x1b[F"),
-                KeyCode::Insert => data.extend_from_slice(b"\x1b[2~"),
-                KeyCode::Delete => data.extend_from_slice(b"\x1b[3~"),
-                KeyCode::PageUp => data.extend_from_slice(b"\x1b[5~"),
-                KeyCode::PageDown => data.extend_from_slice(b"\x1b[6~"),
-                KeyCode::F(1) => data.extend_from_slice(b"\x1bOP"),
-                KeyCode::F(2) => data.extend_from_slice(b"\x1bOQ"),
-                KeyCode::F(3) => data.extend_from_slice(b"\x1bOR"),
-                KeyCode::F(4) => data.extend_from_slice(b"\x1bOS"),
-                KeyCode::F(5) => data.extend_from_slice(b"\x1b[15~"),
-                KeyCode::F(6) => data.extend_from_slice(b"\x1b[17~"),
-                KeyCode::F(7) => data.extend_from_slice(b"\x1b[18~"),
-                KeyCode::F(8) => data.extend_from_slice(b"\x1b[19~"),
-                KeyCode::F(9) => data.extend_from_slice(b"\x1b[20~"),
-                KeyCode::F(10) => data.extend_from_slice(b"\x1b[21~"),
-                KeyCode::F(11) => data.extend_from_slice(b"\x1b[23~"),
-                _ => {}
             }
+            KeyCode::Enter => data.push(b'\r'),
+            KeyCode::Backspace => data.push(127),
+            KeyCode::Tab => data.push(9),
+            KeyCode::Esc => data.push(27),
+            KeyCode::Up => data.extend_from_slice(b"\x1b[A"),
+            KeyCode::Down => data.extend_from_slice(b"\x1b[B"),
+            KeyCode::Right => data.extend_from_slice(b"\x1b[C"),
+            KeyCode::Left => data.extend_from_slice(b"\x1b[D"),
+            KeyCode::Home => data.extend_from_slice(b"\x1b[H"),
+            KeyCode::End => data.extend_from_slice(b"\x1b[F"),
+            KeyCode::Insert => data.extend_from_slice(b"\x1b[2~"),
+            KeyCode::Delete => data.extend_from_slice(b"\x1b[3~"),
+            KeyCode::PageUp => data.extend_from_slice(b"\x1b[5~"),
+            KeyCode::PageDown => data.extend_from_slice(b"\x1b[6~"),
+            KeyCode::F(1) => data.extend_from_slice(b"\x1bOP"),
+            KeyCode::F(2) => data.extend_from_slice(b"\x1bOQ"),
+            KeyCode::F(3) => data.extend_from_slice(b"\x1bOR"),
+            KeyCode::F(4) => data.extend_from_slice(b"\x1bOS"),
+            KeyCode::F(5) => data.extend_from_slice(b"\x1b[15~"),
+            KeyCode::F(6) => data.extend_from_slice(b"\x1b[17~"),
+            KeyCode::F(7) => data.extend_from_slice(b"\x1b[18~"),
+            KeyCode::F(8) => data.extend_from_slice(b"\x1b[19~"),
+            KeyCode::F(9) => data.extend_from_slice(b"\x1b[20~"),
+            KeyCode::F(10) => data.extend_from_slice(b"\x1b[21~"),
+            KeyCode::F(11) => data.extend_from_slice(b"\x1b[23~"),
+            KeyCode::F(12) => data.extend_from_slice(b"\x1b[24~"),
+            _ => {}
+        }
 
-            if !data.is_empty() {
-                let _ = self.server_tx.try_send(ClientMessage::Input {
-                    window_id: id,
-                    data,
-                });
-            }
+        if !data.is_empty() {
+            let _ = self.server_tx.try_send(ClientMessage::Input {
+                window_id: id,
+                data,
+            });
         }
         Ok(false)
     }
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<bool> {
-        // Handle drag state first (window management)
+        self.last_mouse_pos = (mouse.column, mouse.row);
+
+        // --- 1. Window Management (Drag/Resize) ---
+        // This must always take precedence so a drag is not interrupted when passing over other windows.
         if let Some(ref state) = self.drag_state {
             if matches!(mouse.kind, MouseEventKind::Up(_)) {
                 self.drag_state = None;
@@ -466,7 +507,6 @@ impl Client {
             }
 
             if let MouseEventKind::Drag(MouseButton::Left) = mouse.kind {
-                // ... (rest of the window drag logic)
                 // Check if window still exists
                 if !self.windows.contains_key(&state.window_id) {
                     self.drag_state = None;
@@ -494,7 +534,6 @@ impl Client {
                         })
                         .is_err()
                     {
-                        // Channel full, skip this update
                         return Ok(false);
                     }
                 } else {
@@ -509,12 +548,10 @@ impl Client {
                         })
                         .is_err()
                     {
-                        // Channel full, skip this update
                         return Ok(false);
                     }
                 }
 
-                // Update last_update time
                 if let Some(s) = self.drag_state.as_mut() {
                     s.last_update = now;
                 }
@@ -522,10 +559,76 @@ impl Client {
             }
         }
 
+        // --- 2. HOVER PASSTHROUGH LOGIC ---
+        // If mouse is inside ANY window's terminal area (excluding borders),
+        // we capture the event to prevent desktop logic from running.
+        if let Some((id, true)) = self.get_window_at(mouse.column, mouse.row) {
+            // Any click in terminal area focuses the window
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.active_window_id = Some(id);
+                let _ = self
+                    .server_tx
+                    .try_send(ClientMessage::FocusWindow { window_id: id });
+            }
+
+            let win = self.windows.get(&id).unwrap();
+
+            // Only send mouse sequences to the server if the application requested them
+            if win.mouse_reporting {
+                let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
+                let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
+
+                match mouse.kind {
+                    MouseEventKind::Down(btn)
+                    | MouseEventKind::Up(btn)
+                    | MouseEventKind::Drag(btn) => {
+                        let cb = match btn {
+                            MouseButton::Left => 0,
+                            MouseButton::Middle => 1,
+                            MouseButton::Right => 2,
+                        };
+                        let cb = if matches!(mouse.kind, MouseEventKind::Drag(_)) {
+                            cb + 32
+                        } else {
+                            cb
+                        };
+                        let suffix = if matches!(mouse.kind, MouseEventKind::Up(_)) {
+                            'm'
+                        } else {
+                            'M'
+                        };
+                        let data =
+                            format!("\x1b[<{};{};{}{}", cb, rel_x, rel_y, suffix).into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    }
+                    MouseEventKind::ScrollUp => {
+                        let data = format!("\x1b[<64;{};{}M", rel_x, rel_y).into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    }
+                    MouseEventKind::ScrollDown => {
+                        let data = format!("\x1b[<65;{};{}M", rel_x, rel_y).into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    }
+                    _ => {}
+                }
+            }
+            return Ok(false); // ALWAYS return here when over a terminal area. No desktop logic allowed.
+        }
+
+        // --- 3. Standard Window Management / Desktop Logic ---
+        // Only reached if NOT dragging AND NOT hovering over a terminal area.
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Right)
-                if self.mode == Mode::Desktop
-                    || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
+                if self.mode == Mode::Desktop || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 // Calculate window size based on screen size
                 let screen = self.last_screen_size;
@@ -539,7 +642,7 @@ impl Client {
                     command: None,
                     args: vec![],
                 });
-                Ok(false) // Don't quit program
+                Ok(false)
             }
             MouseEventKind::Down(MouseButton::Left) => {
                 // Find window at this position (check front windows first)
@@ -566,37 +669,32 @@ impl Client {
                             && mouse.column == rect.x + rect.width - 1
                             && mouse.row == rect.y + rect.height - 1;
 
-                        // Check for title bar buttons
                         if is_title {
                             if mouse.column >= rect.x + 2 && mouse.column <= rect.x + 4 {
-                                // Close button
                                 let _ = self
                                     .server_tx
                                     .try_send(ClientMessage::CloseWindow { window_id: id });
-                                return Ok(false); // Don't quit program
+                                return Ok(false);
                             }
                             if mouse.column >= rect.x + 6 && mouse.column <= rect.x + 8 {
-                                // Minimize button
                                 let _ = self
                                     .server_tx
                                     .try_send(ClientMessage::MinimizeWindow { window_id: id });
-                                return Ok(false); // Don't quit program
+                                return Ok(false);
                             }
                             if mouse.column >= rect.x + 10 && mouse.column <= rect.x + 12 {
-                                // Maximize button
                                 let _ = self
                                     .server_tx
                                     .try_send(ClientMessage::MaximizeWindow { window_id: id });
-                                return Ok(false); // Don't quit program
+                                return Ok(false);
                             }
                             if mouse.column >= rect.x + rect.width.saturating_sub(5)
                                 && mouse.column < rect.x + rect.width
                             {
-                                // Fullscreen button [F]
                                 let _ = self
                                     .server_tx
                                     .try_send(ClientMessage::ToggleFullscreen { window_id: id });
-                                return Ok(false); // Don't quit program
+                                return Ok(false);
                             }
                         }
 
@@ -606,7 +704,6 @@ impl Client {
                             .server_tx
                             .try_send(ClientMessage::FocusWindow { window_id: id });
 
-                        // Start drag if on title or resize handle or in desktop mode or holding Ctrl
                         let is_mgmt = self.mode == Mode::Desktop
                             || mouse.modifiers.contains(KeyModifiers::CONTROL);
 
@@ -622,130 +719,27 @@ impl Client {
                                         && mouse.row >= rect.y + rect.height - 1),
                                 last_update: std::time::Instant::now(),
                             });
-                        } else if !win.minimized && win.mouse_reporting {
-                            // Pass mouse to terminal if it's in the terminal area and application requested it
-                            let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
-                            let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
-
-                            // SGR mouse reporting (ESC [ < Cb ; Cx ; Cy M/m)
-                            // Cb: 0=left, 1=middle, 2=right, 32=drag+left, 33=drag+middle, 34=drag+right
-                            let cb = match mouse.kind {
-                                MouseEventKind::Down(MouseButton::Left) => 0,
-                                MouseEventKind::Down(MouseButton::Middle) => 1,
-                                MouseEventKind::Down(MouseButton::Right) => 2,
-                                MouseEventKind::Drag(MouseButton::Left) => 32,
-                                MouseEventKind::Drag(MouseButton::Middle) => 33,
-                                MouseEventKind::Drag(MouseButton::Right) => 34,
-                                _ => 0,
-                            };
-
-                            let is_release = matches!(mouse.kind, MouseEventKind::Up(_));
-                            let suffix = if is_release { 'm' } else { 'M' };
-
-                            let data =
-                                format!("\x1b[<{};{};{}{}", cb, rel_x, rel_y, suffix).into_bytes();
-
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
                         }
-
-                        return Ok(false); // Don't quit program
+                        return Ok(false);
                     }
                 }
                 Ok(false)
             }
             MouseEventKind::ScrollUp => {
                 if let Some(id) = self.active_window_id {
-                    if mouse.modifiers.contains(KeyModifiers::CONTROL)
-                        && self
-                            .windows
-                            .get(&id)
-                            .map(|w| w.mouse_reporting)
-                            .unwrap_or(false)
-                    {
-                        if let Some(win) = self.windows.get(&id) {
-                            let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
-                            let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
-                            let data = format!("\x1b[<64;{};{}M", rel_x, rel_y).into_bytes();
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
-                        }
-                    } else {
-                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                            window_id: id,
-                            amount: 3,
-                        });
-                    }
+                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                        window_id: id,
+                        amount: 3,
+                    });
                 }
                 Ok(false)
             }
             MouseEventKind::ScrollDown => {
                 if let Some(id) = self.active_window_id {
-                    if mouse.modifiers.contains(KeyModifiers::CONTROL)
-                        && self
-                            .windows
-                            .get(&id)
-                            .map(|w| w.mouse_reporting)
-                            .unwrap_or(false)
-                    {
-                        if let Some(win) = self.windows.get(&id) {
-                            let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
-                            let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
-                            let data = format!("\x1b[<65;{};{}M", rel_x, rel_y).into_bytes();
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
-                        }
-                    } else {
-                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                            window_id: id,
-                            amount: -3,
-                        });
-                    }
-                }
-                Ok(false)
-            }
-            MouseEventKind::Up(btn) | MouseEventKind::Drag(btn) => {
-                if let Some(id) = self.active_window_id
-                    && let Some(win) = self.windows.get(&id)
-                {
-                    let is_in_win = mouse.column >= win.x
-                        && mouse.column < win.x + win.width
-                        && mouse.row >= win.y
-                        && mouse.row < win.y + win.height;
-
-                    if is_in_win && !win.minimized && win.mouse_reporting {
-                        let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
-                        let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
-
-                        let cb = match btn {
-                            MouseButton::Left => 0,
-                            MouseButton::Middle => 1,
-                            MouseButton::Right => 2,
-                        };
-
-                        let cb = if matches!(mouse.kind, MouseEventKind::Drag(_)) {
-                            cb + 32
-                        } else {
-                            cb
-                        };
-
-                        let is_release = matches!(mouse.kind, MouseEventKind::Up(_));
-                        let suffix = if is_release { 'm' } else { 'M' };
-
-                        let data =
-                            format!("\x1b[<{};{};{}{}", cb, rel_x, rel_y, suffix).into_bytes();
-
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
-                    }
+                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                        window_id: id,
+                        amount: -3,
+                    });
                 }
                 Ok(false)
             }

@@ -81,17 +81,21 @@ impl ServerState {
         args: Vec<String>,
         _tx: std_mpsc::Sender<TermEvent>, // Not used but kept for API compatibility
         screen_size: Rect,
+        title: Option<String>,
     ) -> Result<usize> {
         let id = self.next_window_id;
         self.next_window_id += 1;
 
-        // Ensure window fits on screen
-        width = width.clamp(MIN_WIDTH, screen_size.width.saturating_sub(2));
-        height = height.clamp(MIN_HEIGHT, screen_size.height.saturating_sub(2));
-        x = x.min(screen_size.width.saturating_sub(width).saturating_sub(1));
-        y = y.min(screen_size.height.saturating_sub(height).saturating_sub(1));
+        // Ensure window fits on screen but be less aggressive about x,y
+        width = width.clamp(MIN_WIDTH, screen_size.width.max(MIN_WIDTH + 2).saturating_sub(2));
+        height = height.clamp(MIN_HEIGHT, screen_size.height.max(MIN_HEIGHT + 2).saturating_sub(2));
+        
+        // Only clamp x,y if they are totally outside a reasonable boundary
+        // but allow them to be somewhat off-screen to avoid perfect overlapping
+        x = x.min(screen_size.width.saturating_sub(10));
+        y = y.min(screen_size.height.saturating_sub(5));
 
-        let title = format!("Terminal {}", id);
+        let title = title.unwrap_or_else(|| format!("Terminal {}", id));
         let rect = Rect::new(x, y, width, height);
 
         let rows = rect.height.saturating_sub(2);
@@ -508,9 +512,9 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
         if sizes.is_empty() {
             return Rect::new(0, 0, 200, 60);
         }
-        let min_w = sizes.values().map(|s| s.0).min().unwrap_or(200);
-        let min_h = sizes.values().map(|s| s.1).min().unwrap_or(60);
-        Rect::new(0, 0, min_w, min_h)
+        let max_w = sizes.values().map(|s| s.0).max().unwrap_or(200);
+        let max_h = sizes.values().map(|s| s.1).max().unwrap_or(60);
+        Rect::new(0, 0, max_w, max_h)
     };
 
     // Try to load initial layout if path provided
@@ -520,12 +524,14 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
         && let Ok(layout) = serde_json::from_str::<Layout>(&json)
     {
         for config in layout.windows {
-            let _ = spawn_window(
+            if let Err(e) = spawn_window(
                 state.clone(),
                 event_tx.clone(),
                 config,
                 effective_screen_size,
-            );
+            ) {
+                eprintln!("Failed to spawn window from layout: {}", e);
+            }
         }
         layout_loaded = true;
     }
@@ -679,14 +685,24 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 }
                             }
 
-                            // 2. Load new windows (spawn_window takes its own lock)
+                            // 2. Load new windows
+                            let mut errors = Vec::new();
                             for config in layout.windows {
-                                let _ = spawn_window(
+                                if let Err(e) = spawn_window(
                                     state.clone(),
                                     event_tx.clone(),
                                     config,
                                     effective_screen_size,
-                                );
+                                ) {
+                                    errors.push(format!("Failed to spawn window: {}", e));
+                                }
+                            }
+
+                            if !errors.is_empty() {
+                                let msg = ServerMessage::Error {
+                                    message: errors.join("\n"),
+                                };
+                                broadcast_to_all(&client_writers, &msg).await;
                             }
 
                             // 3. Get final state and sync
@@ -1256,6 +1272,7 @@ fn spawn_window(
             config.args,
             tx,
             screen_size,
+            Some(config.title),
         )?
     };
 
