@@ -47,13 +47,20 @@ struct DragState {
     last_update: std::time::Instant,
 }
 
+struct RenameState {
+    window_id: usize,
+    input: String,
+}
+
 struct Client {
     windows: HashMap<usize, WindowState>,
     active_window_id: Option<usize>,
     mode: Mode,
     drag_state: Option<DragState>,
+    rename_state: Option<RenameState>,
     last_screen_size: Rect,
     last_mouse_pos: (u16, u16),
+    last_click: Option<(usize, std::time::Instant)>,
     server_tx: mpsc::Sender<ClientMessage>,
 }
 
@@ -64,8 +71,10 @@ impl Client {
             active_window_id: None,
             mode: Mode::Terminal,
             drag_state: None,
+            rename_state: None,
             last_screen_size: screen_size,
             last_mouse_pos: (0, 0),
+            last_click: None,
             server_tx,
         }
     }
@@ -107,6 +116,30 @@ impl Client {
                 }
                 Event::Key(key) => {
                     if key.kind != event::KeyEventKind::Press {
+                        return Ok(false);
+                    }
+
+                    // Handle renaming mode
+                    if let Some(ref mut rs) = self.rename_state {
+                        match key.code {
+                            KeyCode::Enter => {
+                                let _ = self.server_tx.try_send(ClientMessage::RenameWindow {
+                                    window_id: rs.window_id,
+                                    title: rs.input.clone(),
+                                });
+                                self.rename_state = None;
+                            }
+                            KeyCode::Esc => {
+                                self.rename_state = None;
+                            }
+                            KeyCode::Backspace => {
+                                rs.input.pop();
+                            }
+                            KeyCode::Char(c) => {
+                                rs.input.push(c);
+                            }
+                            _ => {}
+                        }
                         return Ok(false);
                     }
 
@@ -671,6 +704,27 @@ impl Client {
                             && mouse.row == rect.y + rect.height - 1;
 
                         if is_title {
+                            // Check for double click to rename
+                            let now = std::time::Instant::now();
+                            if let Some((last_id, last_time)) = self.last_click
+                                && last_id == id
+                                && now.duration_since(last_time).as_millis() < 500
+                            {
+                                // Verify we're not clicking the buttons
+                                let is_button = (mouse.column >= rect.x + 2
+                                    && mouse.column <= rect.x + 12)
+                                    || (mouse.column >= rect.x + rect.width.saturating_sub(5));
+                                if !is_button {
+                                    self.rename_state = Some(RenameState {
+                                        window_id: id,
+                                        input: win.title.clone(),
+                                    });
+                                    self.last_click = None;
+                                    return Ok(false);
+                                }
+                            }
+                            self.last_click = Some((id, now));
+
                             if mouse.column >= rect.x + 2 && mouse.column <= rect.x + 4 {
                                 let _ = self
                                     .server_tx
@@ -908,11 +962,16 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             Style::default().fg(Color::Gray)
                         };
 
-                        let title = format!(" [X] [_] [^] {} ", win.title);
+                        let title_text = if let Some(ref rs) = client.rename_state && rs.window_id == win.id {
+                            format!(" [X] [_] [^] > {}_ ", rs.input)
+                        } else {
+                            format!(" [X] [_] [^] {} ", win.title)
+                        };
+
                         let fs_button = " [F] ";
-                        let title_len = title.chars().count();
+                        let title_len = title_text.chars().count();
                         let padding = win.width.saturating_sub(title_len as u16).saturating_sub(fs_button.chars().count() as u16).saturating_sub(2);
-                        let full_title = format!("{}{}{}", title, " ".repeat(padding as usize), fs_button);
+                        let full_title = format!("{}{}{}", title_text, " ".repeat(padding as usize), fs_button);
 
                         let block = if win.minimized {
                             Block::default()

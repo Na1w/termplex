@@ -59,6 +59,9 @@ pub enum ClientMessage {
     /// Request layout load
     LoadLayout { path: String },
 
+    /// Rename a window
+    RenameWindow { window_id: usize, title: String },
+
     /// Capture pane content
     CapturePane { window_id: usize },
 

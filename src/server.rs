@@ -884,6 +884,25 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         }
                     }
 
+                    ClientMessage::RenameWindow { window_id, title } => {
+                        let ws = {
+                            let mut st = state.lock().unwrap();
+                            let window_order = st.window_order.clone();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                win.title = title;
+                                let new_ws = build_window_state(win, &window_order);
+                                win.update_last_state(&new_ws);
+                                Some(new_ws)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(ws) = ws {
+                            let msg = ServerMessage::WindowUpdate { window: ws };
+                            broadcast_to_all(&client_writers, &msg);
+                        }
+                    }
+
                     ClientMessage::ResizeWindow {
                         window_id,
                         width,
