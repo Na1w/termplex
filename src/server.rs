@@ -87,9 +87,15 @@ impl ServerState {
         self.next_window_id += 1;
 
         // Ensure window fits on screen but be less aggressive about x,y
-        width = width.clamp(MIN_WIDTH, screen_size.width.max(MIN_WIDTH + 2).saturating_sub(2));
-        height = height.clamp(MIN_HEIGHT, screen_size.height.max(MIN_HEIGHT + 2).saturating_sub(2));
-        
+        width = width.clamp(
+            MIN_WIDTH,
+            screen_size.width.max(MIN_WIDTH + 2).saturating_sub(2),
+        );
+        height = height.clamp(
+            MIN_HEIGHT,
+            screen_size.height.max(MIN_HEIGHT + 2).saturating_sub(2),
+        );
+
         // Only clamp x,y if they are totally outside a reasonable boundary
         // but allow them to be somewhat off-screen to avoid perfect overlapping
         x = x.min(screen_size.width.saturating_sub(10));
@@ -420,7 +426,6 @@ fn ansi_to_rgb(idx: u8) -> (u8, u8, u8) {
 
 use crate::terminal::TermEvent;
 
-#[allow(clippy::await_holding_lock)]
 pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> Result<()> {
     let addr = format!("{}:{}", host, port);
     println!("TermPlex server starting on {}", addr);
@@ -557,7 +562,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
     while let Some(event) = event_rx.recv().await {
         match event {
             ServerEvent::ClientConnected(id, writer) => {
-                println!("Client {} connected", id);
+                client_writers.insert(id, writer);
 
                 // Initial default size for client until they send Connect message
                 client_sizes.insert(id, (80, 24));
@@ -573,11 +578,12 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                     session_id: id,
                     windows,
                 };
-                if let Ok(data) = encode_message(&welcome) {
-                    let _ = writer.send(data).await;
-                }
 
-                client_writers.insert(id, writer);
+                if let Some(tx) = client_writers.get(&id) {
+                    if let Ok(data) = encode_message(&welcome) {
+                        let _ = tx.try_send(data);
+                    }
+                }
             }
 
             ServerEvent::ClientDisconnected(id) => {
@@ -656,7 +662,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 st.get_all_window_states()
                             };
                             let msg = ServerMessage::FullSync { windows };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -666,9 +672,9 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             let msg = ServerMessage::Error {
                                 message: format!("Failed to save layout: {}", e),
                             };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         } else {
-                            broadcast_to_all(&client_writers, &ServerMessage::LayoutSaved).await;
+                            broadcast_to_all(&client_writers, &ServerMessage::LayoutSaved);
                         }
                     }
 
@@ -702,7 +708,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 let msg = ServerMessage::Error {
                                     message: errors.join("\n"),
                                 };
-                                broadcast_to_all(&client_writers, &msg).await;
+                                broadcast_to_all(&client_writers, &msg);
                             }
 
                             // 3. Get final state and sync
@@ -712,11 +718,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             };
 
                             // Send a single full sync to all clients
-                            let _ = broadcast_to_all(
-                                &client_writers,
-                                &ServerMessage::FullSync { windows },
-                            )
-                            .await;
+                            broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
                         }
                     }
 
@@ -733,7 +735,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                         if !text.is_empty() {
                             let msg = ServerMessage::PaneCaptured { window_id, text };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -825,7 +827,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
 
                         let msg = ServerMessage::FullCaptured { text };
-                        broadcast_to_all(&client_writers, &msg).await;
+                        broadcast_to_all(&client_writers, &msg);
                     }
 
                     ClientMessage::CloseWindow { window_id } => {
@@ -834,13 +836,11 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             st.remove_window(window_id);
                             st.get_all_window_states()
                         };
-                        let _ = broadcast_to_all(
+                        broadcast_to_all(
                             &client_writers,
                             &ServerMessage::WindowClosed { window_id },
-                        )
-                        .await;
-                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows })
-                            .await;
+                        );
+                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
                     }
 
                     ClientMessage::FocusWindow { window_id } => {
@@ -850,7 +850,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             st.get_all_window_states()
                         };
                         let msg = ServerMessage::FullSync { windows };
-                        broadcast_to_all(&client_writers, &msg).await;
+                        broadcast_to_all(&client_writers, &msg);
                     }
 
                     ClientMessage::Input { window_id, data } => {
@@ -892,7 +892,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             }
                         };
                         if let Some(msg) = msg {
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -919,7 +919,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
                         if let Some(ws) = ws {
                             let msg = ServerMessage::WindowUpdate { window: ws };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -939,7 +939,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
                         if let Some(ws) = ws {
                             let msg = ServerMessage::WindowUpdate { window: ws };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -958,7 +958,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
                         if let Some(ws) = ws {
                             let msg = ServerMessage::WindowUpdate { window: ws };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -1003,7 +1003,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
                         if let Some(ws) = ws {
                             let msg = ServerMessage::WindowUpdate { window: ws };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -1101,7 +1101,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         };
                         if let Some(ws) = ws {
                             let msg = ServerMessage::WindowUpdate { window: ws };
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
 
@@ -1153,7 +1153,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             }
                         };
                         if let Some(msg) = msg {
-                            broadcast_to_all(&client_writers, &msg).await;
+                            broadcast_to_all(&client_writers, &msg);
                         }
                     }
                 }
@@ -1202,7 +1202,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                 };
 
                 if let Some(msg) = diff_msg {
-                    broadcast_to_all(&client_writers, &msg).await;
+                    broadcast_to_all(&client_writers, &msg);
                 }
             }
 
@@ -1214,15 +1214,13 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                 };
 
                 // Broadcast closed event
-                let _ = broadcast_to_all(
+                broadcast_to_all(
                     &client_writers,
                     &ServerMessage::WindowClosed { window_id: id },
-                )
-                .await;
+                );
 
                 // Sync all windows to update focus and z-order
-                let _ =
-                    broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows }).await;
+                broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
 
                 // Exit if no more windows and no clients
                 let st = state.lock().unwrap();
@@ -1244,12 +1242,10 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
     Ok(())
 }
 
-async fn broadcast_to_all(writers: &HashMap<u64, mpsc::Sender<Vec<u8>>>, msg: &ServerMessage) {
+fn broadcast_to_all(writers: &HashMap<u64, mpsc::Sender<Vec<u8>>>, msg: &ServerMessage) {
     if let Ok(data) = encode_message(msg) {
         for (_, tx) in writers.iter() {
-            if tx.try_send(data.clone()).is_err() {
-                // Channel full, skip this client
-            }
+            let _ = tx.try_send(data.clone());
         }
     }
 }

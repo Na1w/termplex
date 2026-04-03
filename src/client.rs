@@ -239,12 +239,12 @@ impl Client {
                 };
                 let _ = self.server_tx.try_send(msg);
             }
-            (KeyModifiers::NONE, KeyCode::Char('s')) => {
+            (KeyModifiers::NONE, KeyCode::Char('o')) => {
                 let _ = self.server_tx.try_send(ClientMessage::SaveLayout {
                     path: "layout.json".to_string(),
                 });
             }
-            (KeyModifiers::NONE, KeyCode::Char('l')) => {
+            (KeyModifiers::NONE, KeyCode::Char('i')) => {
                 let _ = self.server_tx.try_send(ClientMessage::LoadLayout {
                     path: "layout.json".to_string(),
                 });
@@ -628,7 +628,8 @@ impl Client {
         // Only reached if NOT dragging AND NOT hovering over a terminal area.
         match mouse.kind {
             MouseEventKind::Down(MouseButton::Right)
-                if self.mode == Mode::Desktop || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
+                if self.mode == Mode::Desktop
+                    || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 // Calculate window size based on screen size
                 let screen = self.last_screen_size;
@@ -958,12 +959,12 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                     let status_rect = Rect::new(0, size.height - 1, size.width, 1);
                     let (status_text, style) = if client.mode == Mode::Desktop {
                         (
-                            " [DESKTOP] | Tab: Focus | Arrows: Move | WASD: Resize | Z: Close | X: Min | C: Max | F: Full | N: New | S: Save | L: Load | V: Pane | P: Full | Q: Quit ",
+                            " [DESKTOP] | Tab: Focus | Arrows: Move | WASD: Resize | Z: Close | X: Min | C: Max | F: Full | N: New | O: Save | I: Load | V: Pane | P: Full | Q: Quit ",
                             Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD),
                         )
                     } else {
                         (
-                            " [F12: Desktop Mode] | Ctrl+RightClick: New | Ctrl+Drag: Move/Resize | ◢: Resize ",
+                            " [F12: Desktop Mode] ",
                             Style::default().bg(Color::Rgb(40, 40, 80)).fg(Color::White).add_modifier(Modifier::BOLD),
                         )
                     };
