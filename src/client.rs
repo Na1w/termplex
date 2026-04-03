@@ -743,12 +743,24 @@ impl Client {
                                     .try_send(ClientMessage::MaximizeWindow { window_id: id });
                                 return Ok(false);
                             }
+
+                            // Fullscreen [F] button
+                            if mouse.column >= rect.x + rect.width.saturating_sub(9)
+                                && mouse.column <= rect.x + rect.width.saturating_sub(6)
+                            {
+                                let _ = self
+                                    .server_tx
+                                    .try_send(ClientMessage::ToggleFullscreen { window_id: id });
+                                return Ok(false);
+                            }
+
+                            // Solo [S] button
                             if mouse.column >= rect.x + rect.width.saturating_sub(5)
                                 && mouse.column < rect.x + rect.width
                             {
                                 let _ = self
                                     .server_tx
-                                    .try_send(ClientMessage::ToggleFullscreen { window_id: id });
+                                    .try_send(ClientMessage::ToggleSolo { window_id: id });
                                 return Ok(false);
                             }
                         }
@@ -968,7 +980,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             format!(" [X] [_] [^] {} ", win.title)
                         };
 
-                        let fs_button = " [F] ";
+                        let fs_button = " [F] [S] ";
                         let title_len = title_text.chars().count();
                         let padding = win.width.saturating_sub(title_len as u16).saturating_sub(fs_button.chars().count() as u16).saturating_sub(2);
                         let full_title = format!("{}{}{}", title_text, " ".repeat(padding as usize), fs_button);

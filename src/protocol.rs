@@ -62,6 +62,9 @@ pub enum ClientMessage {
     /// Rename a window
     RenameWindow { window_id: usize, title: String },
 
+    /// Toggle solo mode for a window (minimize all others)
+    ToggleSolo { window_id: usize },
+
     /// Capture pane content
     CapturePane { window_id: usize },
 

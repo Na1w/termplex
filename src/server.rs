@@ -58,6 +58,8 @@ struct ServerState {
     window_order: Vec<usize>, // z-order: back to front
     next_window_id: usize,
     active_window_id: Option<usize>,
+    solo_mode_origin: Option<usize>, // window_id that triggered solo mode
+    solo_minimized_ids: Vec<usize>,  // IDs that were minimized by solo action
 }
 
 impl ServerState {
@@ -67,6 +69,8 @@ impl ServerState {
             window_order: Vec::new(),
             next_window_id: 1,
             active_window_id: None,
+            solo_mode_origin: None,
+            solo_minimized_ids: Vec::new(),
         }
     }
 
@@ -901,6 +905,54 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             let msg = ServerMessage::WindowUpdate { window: ws };
                             broadcast_to_all(&client_writers, &msg);
                         }
+                    }
+
+                    ClientMessage::ToggleSolo { window_id } => {
+                        let mut st = state.lock().unwrap();
+                        let current_solo = st.solo_mode_origin;
+
+                        if current_solo == Some(window_id) {
+                            // Turn OFF solo mode
+                            let ids_to_restore: Vec<usize> =
+                                st.solo_minimized_ids.drain(..).collect();
+                            for id in ids_to_restore {
+                                if let Some(win) = st.windows.get_mut(&id) {
+                                    win.minimized = false;
+                                }
+                            }
+                            st.solo_mode_origin = None;
+                        } else {
+                            // Turn ON solo mode (possibly switching from another window)
+                            // 1. Restore previous if necessary
+                            let ids_to_restore: Vec<usize> =
+                                st.solo_minimized_ids.drain(..).collect();
+                            for id in ids_to_restore {
+                                if let Some(win) = st.windows.get_mut(&id) {
+                                    win.minimized = false;
+                                }
+                            }
+
+                            // 2. Solo the new window
+                            let ids: Vec<usize> = st.windows.keys().copied().collect();
+                            for id in ids {
+                                if id == window_id {
+                                    if let Some(win) = st.windows.get_mut(&id) {
+                                        win.minimized = false;
+                                    }
+                                } else if let Some(win) = st.windows.get_mut(&id)
+                                    && !win.minimized
+                                {
+                                    win.minimized = true;
+                                    st.solo_minimized_ids.push(id);
+                                }
+                            }
+                            st.solo_mode_origin = Some(window_id);
+                            st.focus_window(window_id);
+                        }
+
+                        // Broadcast full sync to update all clients
+                        let windows = st.get_all_window_states();
+                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
                     }
 
                     ClientMessage::ResizeWindow {
