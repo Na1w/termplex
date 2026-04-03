@@ -248,9 +248,11 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(buf: &[u8]) -> anyhow::Resul
 }
 
 /// Default TCP port for termplex
-#[allow(dead_code)]
 pub const DEFAULT_PORT: u16 = 9876;
 
+/// Default terminal dimensions (internal area)
+pub const DEFAULT_TERM_WIDTH: u16 = 80;
+pub const DEFAULT_TERM_HEIGHT: u16 = 24;
+
 /// Default bind address (localhost only)
-#[allow(dead_code)]
 pub const DEFAULT_BIND_ADDR: &str = "127.0.0.1";

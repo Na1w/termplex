@@ -17,8 +17,6 @@ use tokio::time::sleep;
 
 use crate::protocol::*;
 
-const DEFAULT_HOST: &str = "127.0.0.1";
-const DEFAULT_PORT: u16 = 9876;
 const SERVER_STARTUP_WAIT_MS: u64 = 500;
 
 #[derive(Parser)]
@@ -31,7 +29,7 @@ struct Cli {
     layout: Option<String>,
 
     /// Host to connect to or bind to
-    #[arg(short = 'H', long, default_value = DEFAULT_HOST)]
+    #[arg(short = 'H', long, default_value = DEFAULT_BIND_ADDR)]
     host: String,
 
     /// Port to connect to or bind to
@@ -52,7 +50,7 @@ enum Commands {
         window_id: Option<usize>,
 
         /// Host to connect to
-        #[arg(short = 'H', long, default_value = DEFAULT_HOST)]
+        #[arg(short = 'H', long, default_value = DEFAULT_BIND_ADDR)]
         host: String,
 
         /// Port to connect to

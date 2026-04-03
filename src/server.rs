@@ -23,8 +23,6 @@ fn debug_log(msg: &str) {
     }
 }
 
-const DEFAULT_WIDTH: u16 = 82;
-const DEFAULT_HEIGHT: u16 = 26;
 const MIN_WIDTH: u16 = 10;
 const MIN_HEIGHT: u16 = 3;
 const SCROLLBACK_SIZE: usize = 3000;
@@ -553,8 +551,8 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
             WindowConfig {
                 x: 5,
                 y: 2,
-                width: DEFAULT_WIDTH,
-                height: DEFAULT_HEIGHT,
+                width: DEFAULT_TERM_WIDTH + 2,
+                height: DEFAULT_TERM_HEIGHT + 2,
                 command: None,
                 args: vec![],
                 title: None,
