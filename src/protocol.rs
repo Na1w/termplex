@@ -167,6 +167,7 @@ pub struct WindowState {
     pub exit_code: Option<i32>,
     pub scroll_offset: usize,
     pub scrollback_size: usize,
+    pub fullscreen: bool,
     /// Screen content - flat 1D grid of cells (row-major)
     pub screen: Vec<Cell>,
     /// Cursor position (row, col)

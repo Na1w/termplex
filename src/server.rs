@@ -251,6 +251,7 @@ impl ServerState {
             exit_code,
             scroll_offset: win.scroll_offset,
             scrollback_size,
+            fullscreen: win.fullscreen,
             screen,
             cursor_pos,
             cursor_visible: !win.minimized && win.focused && running,
@@ -382,6 +383,7 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
         exit_code,
         scroll_offset: win.scroll_offset,
         scrollback_size,
+        fullscreen: win.fullscreen,
         screen,
         cursor_pos,
         cursor_visible: !win.minimized && win.focused && running,
@@ -566,8 +568,8 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
             state.clone(),
             event_tx.clone(),
             WindowConfig {
-                x: 5,
-                y: 2,
+                x: 2,
+                y: 4,
                 width: DEFAULT_TERM_WIDTH + 2,
                 height: DEFAULT_TERM_HEIGHT + 2,
                 command: None,
@@ -1113,17 +1115,12 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     // Go Fullscreen
                                     win.saved_rect = Some(win.rect);
                                     let screen = effective_screen_size;
-                                    win.rect = Rect::new(
-                                        1,
-                                        1,
-                                        screen.width.saturating_sub(2),
-                                        screen.height.saturating_sub(2),
-                                    );
+                                    win.rect = Rect::new(0, 0, screen.width, screen.height);
                                     win.fullscreen = true;
                                     win.minimized = false;
                                     let _ = win.terminal.resize(
                                         win.rect.height.saturating_sub(2),
-                                        win.rect.width.saturating_sub(2),
+                                        win.rect.width.saturating_sub(3),
                                     );
                                 }
                                 let new_ws = build_window_state(win, &window_order);
