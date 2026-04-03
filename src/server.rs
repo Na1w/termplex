@@ -220,12 +220,8 @@ impl ServerState {
         let (cursor_pos, mouse_reporting) = {
             let parser = win.terminal.parser.lock().unwrap();
             let s = parser.screen();
-            let pos = if s.hide_cursor() {
-                None
-            } else {
-                let (row, col) = s.cursor_position();
-                Some((row, col))
-            };
+            let (row, col) = s.cursor_position();
+            let pos = Some((row, col));
             let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
             (pos, mouse)
         };
@@ -254,7 +250,7 @@ impl ServerState {
             fullscreen: win.fullscreen,
             screen,
             cursor_pos,
-            cursor_visible: !win.minimized && win.focused && running,
+            cursor_visible: !win.minimized && running,
             mouse_reporting,
         })
     }
@@ -360,12 +356,8 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
     let (cursor_pos, mouse_reporting) = {
         let parser = win.terminal.parser.lock().unwrap();
         let s = parser.screen();
-        let pos = if s.hide_cursor() {
-            None
-        } else {
-            let (row, col) = s.cursor_position();
-            Some((row, col))
-        };
+        let (row, col) = s.cursor_position();
+        let pos = Some((row, col));
         let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
         (pos, mouse)
     };
@@ -386,7 +378,7 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
         fullscreen: win.fullscreen,
         screen,
         cursor_pos,
-        cursor_visible: !win.minimized && win.focused && running,
+        cursor_visible: !win.minimized && running,
         mouse_reporting,
         z_order: window_order
             .iter()
