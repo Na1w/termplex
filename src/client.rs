@@ -205,6 +205,9 @@ impl Client {
                         .try_send(ClientMessage::ToggleFullscreen { window_id: id });
                 }
             }
+            (Menu::Window, 5) => {
+                let _ = self.server_tx.try_send(ClientMessage::TileWindows);
+            }
 
             (Menu::View, 0) => {
                 self.mode = if self.mode == Mode::Desktop {
@@ -271,7 +274,7 @@ impl Client {
                             KeyCode::Down => {
                                 let items_count: usize = match self.menu {
                                     Menu::File => 6,
-                                    Menu::Window => 5,
+                                    Menu::Window => 6,
                                     Menu::View => 1,
                                     _ => 0,
                                 };
@@ -465,6 +468,9 @@ impl Client {
                         .server_tx
                         .try_send(ClientMessage::ToggleFullscreen { window_id: id });
                 }
+            }
+            (KeyModifiers::NONE, KeyCode::Char('g')) => {
+                let _ = self.server_tx.try_send(ClientMessage::TileWindows);
             }
             (KeyModifiers::NONE, KeyCode::Char('v')) => {
                 if let Some(id) = self.active_window_id {
@@ -747,7 +753,7 @@ impl Client {
 
                 let items_count = match self.menu {
                     Menu::File => 6,
-                    Menu::Window => 5,
+                    Menu::Window => 6,
                     Menu::View => 1,
                     _ => 0,
                 };
@@ -1396,6 +1402,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                                 " Maximize (C)     ",
                                 " Solo (S)         ",
                                 " Fullscreen (F)   ",
+                                " Tile Grid (G)    ",
                             ],
                             Menu::View => vec![" Toggle Desktop (F12) "],
                             _ => vec![],

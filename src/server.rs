@@ -955,6 +955,60 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
                     }
 
+                    ClientMessage::TileWindows => {
+                        let mut st = state.lock().unwrap();
+                        let window_order = st.window_order.clone();
+
+                        // Get all visible windows
+                        let visible_ids: Vec<usize> = st
+                            .window_order
+                            .iter()
+                            .filter(|&&id| !st.windows.get(&id).unwrap().minimized)
+                            .copied()
+                            .collect();
+
+                        if visible_ids.is_empty() {
+                            continue;
+                        }
+
+                        let count = visible_ids.len();
+                        let cols = (count as f64).sqrt().ceil() as u16;
+                        let rows = ((count as f64) / cols as f64).ceil() as u16;
+
+                        let screen_w = effective_screen_size.width;
+                        let screen_h = effective_screen_size.height.saturating_sub(1); // Space for menu
+
+                        let win_w = screen_w / cols;
+                        let win_h = screen_h / rows;
+
+                        for (i, id) in visible_ids.iter().enumerate() {
+                            let r = (i as u16) / cols;
+                            let c = (i as u16) % cols;
+
+                            let x = c * win_w;
+                            let y = 1 + (r * win_h);
+
+                            let actual_w = if c == cols - 1 { screen_w - x } else { win_w };
+                            let actual_h = if r == rows - 1 {
+                                screen_h - (y - 1)
+                            } else {
+                                win_h
+                            };
+
+                            if let Some(win) = st.windows.get_mut(id) {
+                                win.rect = Rect::new(x, y, actual_w, actual_h);
+                                let _ = win
+                                    .terminal
+                                    .resize(actual_h.saturating_sub(2), actual_w.saturating_sub(2));
+                                let ws = build_window_state(win, &window_order);
+                                win.update_last_state(&ws);
+                            }
+                        }
+
+                        let windows = st.get_all_window_states();
+                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                    }
+
                     ClientMessage::ResizeWindow {
                         window_id,
                         width,

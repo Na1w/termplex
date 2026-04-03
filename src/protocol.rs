@@ -65,6 +65,9 @@ pub enum ClientMessage {
     /// Toggle solo mode for a window (minimize all others)
     ToggleSolo { window_id: usize },
 
+    /// Auto-tile all non-minimized windows
+    TileWindows,
+
     /// Capture pane content
     CapturePane { window_id: usize },
 
