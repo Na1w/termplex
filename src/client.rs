@@ -1340,13 +1340,15 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             .style(Style::default().bg(Color::Rgb(40, 40, 60)))
                     } else {
                         let size_text = format!(
-                            " {}x{} [D] ",
+                            " {}x{} ",
                             win.width.saturating_sub(2),
                             win.height.saturating_sub(2)
                         );
+                        let reset_text = " [D] ";
                         Block::default()
                             .title(full_title)
-                            .title_bottom(Line::from(size_text).alignment(Alignment::Right))
+                            .title_bottom(Line::from(size_text).alignment(Alignment::Left))
+                            .title_bottom(Line::from(reset_text).alignment(Alignment::Right))
                             .borders(Borders::ALL)
                             .border_style(border_style)
                             .style(Style::default().bg(Color::Black))
