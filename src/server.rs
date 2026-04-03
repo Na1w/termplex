@@ -627,25 +627,13 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         command,
                         args,
                     } => {
-                        // Clamp window size to fit within screen (accounting for x,y position)
-                        let available_width = effective_screen_size
-                            .width
-                            .saturating_sub(x)
-                            .saturating_sub(2);
-                        let available_height = effective_screen_size
-                            .height
-                            .saturating_sub(y)
-                            .saturating_sub(2);
-                        let max_width = available_width.max(MIN_WIDTH);
-                        let max_height = available_height.max(MIN_HEIGHT);
-                        let actual_width = width.min(max_width);
-                        let actual_height = height.min(max_height);
-
+                        // Prioritize requested size. create_window will still ensure
+                        // it's not larger than the total screen area.
                         let config = WindowConfig {
                             x,
                             y,
-                            width: actual_width,
-                            height: actual_height,
+                            width,
+                            height,
                             command,
                             args,
                             title: None,
