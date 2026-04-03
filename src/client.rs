@@ -39,6 +39,14 @@ enum Mode {
     Desktop,
 }
 
+#[derive(PartialEq, Eq, Debug, Clone, Copy)]
+enum Menu {
+    None,
+    File,
+    Window,
+    View,
+}
+
 struct DragState {
     window_id: usize,
     start_mouse: (u16, u16),
@@ -56,6 +64,8 @@ struct Client {
     windows: HashMap<usize, WindowState>,
     active_window_id: Option<usize>,
     mode: Mode,
+    menu: Menu,
+    selected_item: usize,
     drag_state: Option<DragState>,
     rename_state: Option<RenameState>,
     last_screen_size: Rect,
@@ -70,6 +80,8 @@ impl Client {
             windows: HashMap::new(),
             active_window_id: None,
             mode: Mode::Terminal,
+            menu: Menu::None,
+            selected_item: 0,
             drag_state: None,
             rename_state: None,
             last_screen_size: screen_size,
@@ -101,6 +113,99 @@ impl Client {
             }
         }
         None
+    }
+
+    fn execute_menu_item(&mut self, menu: Menu, idx: usize) -> Result<bool> {
+        match (menu, idx) {
+            (Menu::File, 0) => {
+                // New Terminal
+                let screen = self.last_screen_size;
+                let width = (screen.width.saturating_sub(4)).clamp(20, 80);
+                let height = (screen.height.saturating_sub(6)).clamp(5, 24);
+                let x = (screen.width.saturating_sub(width)) / 2;
+                let y = (screen.height.saturating_sub(height)) / 2;
+                let _ = self.server_tx.try_send(ClientMessage::CreateWindow {
+                    x,
+                    y,
+                    width,
+                    height,
+                    command: None,
+                    args: vec![],
+                });
+            }
+            (Menu::File, 1) => {
+                // Save Layout
+                let _ = self.server_tx.try_send(ClientMessage::SaveLayout {
+                    path: "layout.json".to_string(),
+                });
+            }
+            (Menu::File, 2) => {
+                // Load Layout
+                let _ = self.server_tx.try_send(ClientMessage::LoadLayout {
+                    path: "layout.json".to_string(),
+                });
+            }
+            (Menu::File, 3) => {
+                // Capture Pane
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::CapturePane { window_id: id });
+                }
+            }
+            (Menu::File, 4) => {
+                // Capture Full
+                let _ = self.server_tx.try_send(ClientMessage::CaptureFull);
+            }
+            (Menu::File, 5) => return Ok(true), // Quit
+
+            (Menu::Window, 0) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::CloseWindow { window_id: id });
+                }
+            }
+            (Menu::Window, 1) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::MinimizeWindow { window_id: id });
+                }
+            }
+            (Menu::Window, 2) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::MaximizeWindow { window_id: id });
+                }
+            }
+            (Menu::Window, 3) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::ToggleSolo { window_id: id });
+                }
+            }
+            (Menu::Window, 4) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::ToggleFullscreen { window_id: id });
+                }
+            }
+
+            (Menu::View, 0) => {
+                self.mode = if self.mode == Mode::Desktop {
+                    Mode::Terminal
+                } else {
+                    Mode::Desktop
+                }
+            }
+            _ => {}
+        }
+        self.menu = Menu::None;
+        Ok(false)
     }
 
     fn handle_event(&mut self, event: AppEvent) -> Result<bool> {
@@ -143,6 +248,52 @@ impl Client {
                         return Ok(false);
                     }
 
+                    // Handle menu navigation
+                    if self.menu != Menu::None {
+                        match key.code {
+                            KeyCode::Esc => {
+                                self.menu = Menu::None;
+                            }
+                            KeyCode::Up => {
+                                self.selected_item = self.selected_item.saturating_sub(1);
+                            }
+                            KeyCode::Down => {
+                                let items_count: usize = match self.menu {
+                                    Menu::File => 6,
+                                    Menu::Window => 5,
+                                    Menu::View => 1,
+                                    _ => 0,
+                                };
+                                if self.selected_item < items_count.saturating_sub(1) {
+                                    self.selected_item += 1;
+                                }
+                            }
+                            KeyCode::Left => {
+                                self.menu = match self.menu {
+                                    Menu::File => Menu::View,
+                                    Menu::Window => Menu::File,
+                                    Menu::View => Menu::Window,
+                                    _ => Menu::None,
+                                };
+                                self.selected_item = 0;
+                            }
+                            KeyCode::Right => {
+                                self.menu = match self.menu {
+                                    Menu::File => Menu::Window,
+                                    Menu::Window => Menu::View,
+                                    Menu::View => Menu::File,
+                                    _ => Menu::None,
+                                };
+                                self.selected_item = 0;
+                            }
+                            KeyCode::Enter => {
+                                return self.execute_menu_item(self.menu, self.selected_item);
+                            }
+                            _ => {}
+                        }
+                        return Ok(false);
+                    }
+
                     // Hover-based redirection:
                     // If mouse is inside ANY window's terminal area (excluding borders),
                     // send ALL keys directly to that window unconditionally.
@@ -158,6 +309,14 @@ impl Client {
                         } else {
                             Mode::Terminal
                         };
+
+                        // Auto-activate menu in desktop mode for keyboard accessibility
+                        if self.mode == Mode::Desktop {
+                            self.menu = Menu::File;
+                            self.selected_item = 0;
+                        } else {
+                            self.menu = Menu::None;
+                        }
                     } else if self.mode == Mode::Desktop {
                         return self.handle_desktop_key(key);
                     } else {
@@ -530,6 +689,67 @@ impl Client {
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<bool> {
         self.last_mouse_pos = (mouse.column, mouse.row);
+
+        // --- 0. MENU HANDLING ---
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            if mouse.row == 0 {
+                // Clicked on the menu bar
+                if mouse.column >= 2 && mouse.column <= 7 {
+                    self.menu = if self.menu == Menu::File {
+                        Menu::None
+                    } else {
+                        Menu::File
+                    };
+                    self.mode = Mode::Desktop;
+                } else if mouse.column >= 10 && mouse.column <= 17 {
+                    self.menu = if self.menu == Menu::Window {
+                        Menu::None
+                    } else {
+                        Menu::Window
+                    };
+                    self.mode = Mode::Desktop;
+                } else if mouse.column >= 20 && mouse.column <= 25 {
+                    self.menu = if self.menu == Menu::View {
+                        Menu::None
+                    } else {
+                        Menu::View
+                    };
+                    self.mode = Mode::Desktop;
+                } else if mouse.column >= self.last_screen_size.width.saturating_sub(20) {
+                    self.mode = if self.mode == Mode::Desktop {
+                        Mode::Terminal
+                    } else {
+                        Mode::Desktop
+                    };
+                }
+                return Ok(false);
+            }
+
+            // Clicked inside a dropdown?
+            if self.menu != Menu::None {
+                let x_start = match self.menu {
+                    Menu::File => 2,
+                    Menu::Window => 10,
+                    Menu::View => 20,
+                    _ => 0,
+                };
+
+                let items_count = match self.menu {
+                    Menu::File => 6,
+                    Menu::Window => 5,
+                    Menu::View => 1,
+                    _ => 0,
+                };
+
+                if mouse.column >= x_start && mouse.row >= 1 && mouse.row <= items_count + 1 {
+                    let idx = mouse.row.saturating_sub(2) as usize;
+                    return self.execute_menu_item(self.menu, idx);
+                }
+
+                // Clicked outside dropdown
+                self.menu = Menu::None;
+            }
+        }
 
         // --- 1. Window Management (Drag/Resize) ---
         // This must always take precedence so a drag is not interrupted when passing over other windows.
@@ -926,121 +1146,221 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                 let size = f.area();
                 // ... (rest of the drawing logic)
 
-                    // Background
-                    f.render_widget(
-                        Block::default()
-                            .title(" TermPlex ")
-                            .borders(Borders::ALL)
-                            .style(Style::default().bg(Color::Rgb(15, 15, 25)).fg(Color::DarkGray)),
-                        size,
-                    );
-                    // Render windows - sort by z_order so front windows are rendered last (on top)
-                    let mut windows_to_render: Vec<_> = client.windows.values().collect();
-                    windows_to_render.sort_by(|a, b| a.z_order.cmp(&b.z_order));
-                    for win in windows_to_render {
-                        let render_rect = if win.minimized {
-                            Rect::new(win.x, win.y, win.width, 1)
-                        } else {
-                            Rect::new(win.x, win.y, win.width, win.height)
-                        };
-                        // Shadow
-                        let shadow_area = Rect::new(
-                            render_rect.x + 1,
-                            render_rect.y + 1,
-                            render_rect.width,
-                            render_rect.height,
-                        )
-                        .intersection(size);
-                        if !shadow_area.is_empty() && win.focused {
-                            f.render_widget(
-                                Block::default().style(Style::default().bg(Color::Rgb(30, 30, 30))),
-                                shadow_area,
-                            );
-                        }
+                // Background
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(30, 30, 50)))
+                        .style(Style::default().bg(Color::Rgb(10, 10, 20))),
+                    size,
+                );
 
-                        // Window area
-                        let window_area = render_rect.intersection(size);
-                        if window_area.is_empty() {
-                            continue;
-                        }
-
-                        // Clear window area
-                        f.render_widget(Clear, window_area);
-
-                        // Border/Header
-                        let border_style = if win.focused {
-                            Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::Gray)
-                        };
-
-                        let title_text = if let Some(ref rs) = client.rename_state && rs.window_id == win.id {
-                            format!(" [X] [_] [^] > {}_ ", rs.input)
-                        } else {
-                            format!(" [X] [_] [^] {} ", win.title)
-                        };
-
-                        let fs_button = " [F] [S] ";
-                        let title_len = title_text.chars().count();
-                        let padding = win.width.saturating_sub(title_len as u16).saturating_sub(fs_button.chars().count() as u16).saturating_sub(2);
-                        let full_title = format!("{}{}{}", title_text, " ".repeat(padding as usize), fs_button);
-
-                        let block = if win.minimized {
-                            Block::default()
-                                .title(full_title)
-                                .style(Style::default().bg(Color::Rgb(40, 40, 60)))
-                        } else {
-                            Block::default()
-                                .title(full_title)
-                                .borders(Borders::ALL)
-                                .border_style(border_style)
-                                .style(Style::default().bg(Color::Black))
-                        };
-                        f.render_widget(block, window_area);
-
-                        // Terminal content
-                        if !win.minimized {
-                            let inner_area = Rect::new(
-                                win.x + 1,
-                                win.y + 1,
-                                win.width.saturating_sub(2),
-                                win.height.saturating_sub(2),
-                            )
-                            .intersection(size);
-
-                            if !inner_area.is_empty() {
-                                f.render_widget(TerminalWidget::new(win), inner_area);
-                            }
-
-                            // Resize handle
-                            let handle_x = win.x + win.width - 1;
-                            let handle_y = win.y + win.height - 1;
-                            if handle_x < size.width && handle_y < size.height {
-                                let style = if win.focused {
-                                    Style::default().fg(Color::Cyan)
-                                } else {
-                                    Style::default().fg(Color::Gray)
-                                };
-                                f.buffer_mut()[(handle_x, handle_y)].set_char('◢').set_style(style);
-                            }
-                        }
+                // Render windows - sort by z_order so front windows are rendered last (on top)
+                let mut windows_to_render: Vec<_> = client.windows.values().collect();
+                windows_to_render.sort_by(|a, b| a.z_order.cmp(&b.z_order));
+                for win in windows_to_render {
+                    let render_rect = if win.minimized {
+                        Rect::new(win.x, win.y, win.width, 1)
+                    } else {
+                        Rect::new(win.x, win.y, win.width, win.height)
+                    };
+                    // Shadow
+                    let shadow_area = Rect::new(
+                        render_rect.x + 1,
+                        render_rect.y + 1,
+                        render_rect.width,
+                        render_rect.height,
+                    )
+                    .intersection(size);
+                    if !shadow_area.is_empty() && win.focused {
+                        f.render_widget(
+                            Block::default().style(Style::default().bg(Color::Rgb(30, 30, 30))),
+                            shadow_area,
+                        );
                     }
 
-                    // Status bar
-                    let status_rect = Rect::new(0, size.height - 1, size.width, 1);
-                    let (status_text, style) = if client.mode == Mode::Desktop {
-                        (
-                            " [DESKTOP] | Tab: Focus | Arrows: Move | WASD: Resize | Z: Close | X: Min | C: Max | F: Full | N: New | O: Save | I: Load | V: Pane | P: Full | Q: Quit ",
-                            Style::default().bg(Color::Yellow).fg(Color::Black).add_modifier(Modifier::BOLD),
-                        )
+                    // Window area
+                    let window_area = render_rect.intersection(size);
+                    if window_area.is_empty() {
+                        continue;
+                    }
+
+                    // Clear window area
+                    f.render_widget(Clear, window_area);
+
+                    // Border/Header
+                    let border_style = if win.focused {
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD)
                     } else {
-                        (
-                            " [F12: Desktop Mode] ",
-                            Style::default().bg(Color::Rgb(40, 40, 80)).fg(Color::White).add_modifier(Modifier::BOLD),
-                        )
+                        Style::default().fg(Color::Gray)
                     };
-                    f.render_widget(Paragraph::new(status_text).style(style), status_rect);
-                })?;
+
+                    let title_text = if let Some(ref rs) = client.rename_state
+                        && rs.window_id == win.id
+                    {
+                        format!(" [X] [_] [^] > {}_ ", rs.input)
+                    } else {
+                        format!(" [X] [_] [^] {} ", win.title)
+                    };
+
+                    let fs_button = " [F] [S] ";
+                    let title_len = title_text.chars().count();
+                    let padding = win
+                        .width
+                        .saturating_sub(title_len as u16)
+                        .saturating_sub(fs_button.chars().count() as u16)
+                        .saturating_sub(2);
+                    let full_title = format!(
+                        "{}{}{}",
+                        title_text,
+                        " ".repeat(padding as usize),
+                        fs_button
+                    );
+
+                    let block = if win.minimized {
+                        Block::default()
+                            .title(full_title)
+                            .style(Style::default().bg(Color::Rgb(40, 40, 60)))
+                    } else {
+                        Block::default()
+                            .title(full_title)
+                            .borders(Borders::ALL)
+                            .border_style(border_style)
+                            .style(Style::default().bg(Color::Black))
+                    };
+                    f.render_widget(block, window_area);
+
+                    // Terminal content
+                    if !win.minimized {
+                        let inner_area = Rect::new(
+                            win.x + 1,
+                            win.y + 1,
+                            win.width.saturating_sub(2),
+                            win.height.saturating_sub(2),
+                        )
+                        .intersection(size);
+
+                        if !inner_area.is_empty() {
+                            f.render_widget(TerminalWidget::new(win), inner_area);
+                        }
+
+                        // Resize handle
+                        let handle_x = win.x + win.width - 1;
+                        let handle_y = win.y + win.height - 1;
+                        if handle_x < size.width && handle_y < size.height {
+                            let style = if win.focused {
+                                Style::default().fg(Color::Cyan)
+                            } else {
+                                Style::default().fg(Color::Gray)
+                            };
+                            f.buffer_mut()[(handle_x, handle_y)]
+                                .set_char('◢')
+                                .set_style(style);
+                        }
+                    }
+                }
+
+                // --- MENU BAR (Always on Top) ---
+                let menu_rect = Rect::new(0, 0, size.width, 1);
+                let menu_style = if client.mode == Mode::Desktop {
+                    Style::default()
+                        .bg(Color::Rgb(50, 50, 100))
+                        .fg(Color::White)
+                } else {
+                    Style::default().bg(Color::Rgb(20, 20, 40)).fg(Color::Gray)
+                };
+                f.render_widget(Block::default().style(menu_style), menu_rect);
+
+                let menus = [
+                    (Menu::File, " File "),
+                    (Menu::Window, " Window "),
+                    (Menu::View, " View "),
+                ];
+
+                let mut x_offset = 2;
+                for (m, label) in menus {
+                    let style = if client.menu == m {
+                        Style::default()
+                            .bg(Color::White)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD)
+                    } else if client.mode == Mode::Desktop {
+                        Style::default().fg(Color::White)
+                    } else {
+                        Style::default().fg(Color::Gray)
+                    };
+                    f.render_widget(
+                        Paragraph::new(label).style(style),
+                        Rect::new(x_offset, 0, label.len() as u16, 1),
+                    );
+
+                    // Render dropdown
+                    if client.menu == m {
+                        let items = match m {
+                            Menu::File => vec![
+                                " New Terminal (N) ",
+                                " Save Layout (O)  ",
+                                " Load Layout (I)  ",
+                                " Capture Pane (V) ",
+                                " Capture Full (P) ",
+                                " Quit (Q)         ",
+                            ],
+                            Menu::Window => vec![
+                                " Close (Z)        ",
+                                " Minimize (X)     ",
+                                " Maximize (C)     ",
+                                " Solo (S)         ",
+                                " Fullscreen (F)   ",
+                            ],
+                            Menu::View => vec![" Toggle Desktop (F12) "],
+                            _ => vec![],
+                        };
+
+                        let dw = items.iter().map(|s| s.len()).max().unwrap_or(0) as u16;
+                        let dh = items.len() as u16;
+                        let dropdown_rect = Rect::new(x_offset, 1, dw + 2, dh + 2);
+                        f.render_widget(Clear, dropdown_rect);
+                        f.render_widget(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::White))
+                                .style(Style::default().bg(Color::Rgb(30, 30, 50))),
+                            dropdown_rect,
+                        );
+
+                        for (i, item) in items.iter().enumerate() {
+                            let style = if client.selected_item == i {
+                                Style::default()
+                                    .bg(Color::Cyan)
+                                    .fg(Color::Black)
+                                    .add_modifier(Modifier::BOLD)
+                            } else {
+                                Style::default().fg(Color::White)
+                            };
+                            f.render_widget(
+                                Paragraph::new(*item).style(style),
+                                Rect::new(x_offset + 1, 2 + i as u16, dw, 1),
+                            );
+                        }
+                    }
+                    x_offset += label.len() as u16 + 2;
+                }
+
+                if client.mode == Mode::Terminal {
+                    let hint = " [F12] Desktop Mode ";
+                    f.render_widget(
+                        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+                        Rect::new(
+                            size.width.saturating_sub(hint.len() as u16 + 2),
+                            0,
+                            hint.len() as u16,
+                            1,
+                        ),
+                    );
+                }
+            })?;
             needs_redraw = false;
         }
 
