@@ -37,17 +37,10 @@ enum AppEvent {
 }
 
 #[derive(PartialEq, Eq, Debug, Clone, Copy)]
-enum Mode {
-    Terminal,
-    Desktop,
-}
-
-#[derive(PartialEq, Eq, Debug, Clone, Copy)]
 enum Menu {
     None,
     File,
     Window,
-    View,
 }
 
 struct DragState {
@@ -92,7 +85,6 @@ enum HitTarget {
 struct Client {
     windows: HashMap<usize, WindowState>,
     active_window_id: Option<usize>,
-    mode: Mode,
     menu: Menu,
     selected_item: usize,
     clipboard: String,
@@ -114,7 +106,6 @@ impl Client {
         Self {
             windows: HashMap::new(),
             active_window_id: None,
-            mode: Mode::Terminal,
             menu: Menu::None,
             selected_item: 0,
             clipboard: String::new(),
@@ -278,11 +269,7 @@ impl Client {
 
         // --- 3. Menu Bar (Always on top) ---
         if !has_fullscreen {
-            let menus = [
-                (Menu::File, " File "),
-                (Menu::Window, " Window "),
-                (Menu::View, " View "),
-            ];
+            let menus = [(Menu::File, " File "), (Menu::Window, " Window ")];
             let mut x_offset = 2;
             for (m, label) in menus {
                 let label_len = label.len() as u16;
@@ -295,14 +282,12 @@ impl Client {
                     let items_count = match m {
                         Menu::File => 6,
                         Menu::Window => 6,
-                        Menu::View => 1,
                         _ => 0,
                     };
                     // Approximate dropdown width (matched with rendering)
                     let dw = match m {
                         Menu::File => 18,
                         Menu::Window => 18,
-                        Menu::View => 22,
                         _ => 0,
                     };
                     for dy in 0..items_count {
@@ -398,14 +383,6 @@ impl Client {
             (Menu::Window, 5) => {
                 let _ = self.server_tx.try_send(ClientMessage::TileWindows);
             }
-
-            (Menu::View, 0) => {
-                self.mode = if self.mode == Mode::Desktop {
-                    Mode::Terminal
-                } else {
-                    Mode::Desktop
-                }
-            }
             _ => {}
         }
         self.menu = Menu::None;
@@ -467,7 +444,6 @@ impl Client {
                                 let items_count: usize = match self.menu {
                                     Menu::File => 6,
                                     Menu::Window => 6,
-                                    Menu::View => 1,
                                     _ => 0,
                                 };
                                 if self.selected_item < items_count.saturating_sub(1) {
@@ -476,9 +452,8 @@ impl Client {
                             }
                             KeyCode::Left => {
                                 self.menu = match self.menu {
-                                    Menu::File => Menu::View,
+                                    Menu::File => Menu::Window,
                                     Menu::Window => Menu::File,
-                                    Menu::View => Menu::Window,
                                     _ => Menu::None,
                                 };
                                 self.selected_item = 0;
@@ -486,8 +461,7 @@ impl Client {
                             KeyCode::Right => {
                                 self.menu = match self.menu {
                                     Menu::File => Menu::Window,
-                                    Menu::Window => Menu::View,
-                                    Menu::View => Menu::File,
+                                    Menu::Window => Menu::File,
                                     _ => Menu::None,
                                 };
                                 self.selected_item = 0;
@@ -508,28 +482,9 @@ impl Client {
                         return self.send_key_to_window(id, key);
                     }
 
-                    if key.code == KeyCode::F(12) {
-                        // Toggle mode normally
-                        self.mode = if self.mode == Mode::Terminal {
-                            Mode::Desktop
-                        } else {
-                            Mode::Terminal
-                        };
-
-                        // Auto-activate menu in desktop mode for keyboard accessibility
-                        if self.mode == Mode::Desktop {
-                            self.menu = Menu::File;
-                            self.selected_item = 0;
-                        } else {
-                            self.menu = Menu::None;
-                        }
-                    } else if self.mode == Mode::Desktop {
-                        return self.handle_desktop_key(key);
-                    } else {
-                        // Default to active window if not hovering over anything specific
-                        if let Some(id) = self.active_window_id {
-                            return self.send_key_to_window(id, key);
-                        }
+                    // Default to active window if not hovering over anything specific
+                    if let Some(id) = self.active_window_id {
+                        return self.send_key_to_window(id, key);
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -615,196 +570,6 @@ impl Client {
                 }
                 _ => {}
             },
-        }
-        Ok(false)
-    }
-
-    fn handle_desktop_key(&mut self, key: KeyEvent) -> Result<bool> {
-        match (key.modifiers, key.code) {
-            (KeyModifiers::NONE, KeyCode::Char('q')) => {
-                return Ok(true);
-            }
-            (KeyModifiers::NONE, KeyCode::Char('n')) => {
-                // Calculate window size based on screen size
-                let screen = self.last_screen_size;
-                let width = DEFAULT_TERM_WIDTH + 2;
-                let height = DEFAULT_TERM_HEIGHT + 2;
-                let x = (screen.width.saturating_sub(width)) / 2;
-                let y = ((screen.height.saturating_sub(height)) / 2).max(2);
-                let msg = ClientMessage::CreateWindow {
-                    x,
-                    y,
-                    width,
-                    height,
-                    command: None,
-                    args: vec![],
-                };
-                let _ = self.server_tx.try_send(msg);
-            }
-            (KeyModifiers::NONE, KeyCode::Char('o')) => {
-                let _ = self.server_tx.try_send(ClientMessage::SaveLayout {
-                    path: "layout.json".to_string(),
-                });
-            }
-            (KeyModifiers::NONE, KeyCode::Char('i')) => {
-                let _ = self.server_tx.try_send(ClientMessage::LoadLayout {
-                    path: "layout.json".to_string(),
-                });
-            }
-            (KeyModifiers::NONE, KeyCode::Char('c')) => {
-                if let Some(id) = self.active_window_id {
-                    let _ = self
-                        .server_tx
-                        .try_send(ClientMessage::MaximizeWindow { window_id: id });
-                }
-            }
-            (KeyModifiers::NONE, KeyCode::Char('f')) => {
-                if let Some(id) = self.active_window_id {
-                    let _ = self
-                        .server_tx
-                        .try_send(ClientMessage::ToggleFullscreen { window_id: id });
-                }
-            }
-            (KeyModifiers::NONE, KeyCode::Char('g')) => {
-                let _ = self.server_tx.try_send(ClientMessage::TileWindows);
-            }
-            (KeyModifiers::NONE, KeyCode::Char('v')) => {
-                if let Some(id) = self.active_window_id {
-                    let _ = self
-                        .server_tx
-                        .try_send(ClientMessage::CapturePane { window_id: id });
-                }
-            }
-            (KeyModifiers::NONE, KeyCode::Char('p')) => {
-                let _ = self.server_tx.try_send(ClientMessage::CaptureFull);
-            }
-
-            (KeyModifiers::NONE, KeyCode::Tab) => {
-                if key.modifiers.contains(KeyModifiers::SHIFT) {
-                    // Prev window
-                    let ids: Vec<_> = self.windows.keys().copied().collect();
-                    if let Some(active) = self.active_window_id
-                        && let Some(pos) = ids.iter().position(|&id| id == active)
-                    {
-                        let new_pos = if pos == 0 { ids.len() - 1 } else { pos - 1 };
-                        self.active_window_id = Some(ids[new_pos]);
-                        let _ = self.server_tx.try_send(ClientMessage::FocusWindow {
-                            window_id: ids[new_pos],
-                        });
-                    }
-                } else {
-                    // Next window
-                    let ids: Vec<_> = self.windows.keys().copied().collect();
-                    if let Some(active) = self.active_window_id
-                        && let Some(pos) = ids.iter().position(|&id| id == active)
-                    {
-                        let new_pos = (pos + 1) % ids.len();
-                        self.active_window_id = Some(ids[new_pos]);
-                        let _ = self.server_tx.try_send(ClientMessage::FocusWindow {
-                            window_id: ids[new_pos],
-                        });
-                    }
-                }
-            }
-            _ => {
-                if let Some(id) = self.active_window_id {
-                    match key.code {
-                        KeyCode::Char('z') => {
-                            let _ = self
-                                .server_tx
-                                .try_send(ClientMessage::CloseWindow { window_id: id });
-                        }
-                        KeyCode::Char('x') => {
-                            let _ = self
-                                .server_tx
-                                .try_send(ClientMessage::MinimizeWindow { window_id: id });
-                        }
-                        KeyCode::Char('c') => {
-                            let _ = self
-                                .server_tx
-                                .try_send(ClientMessage::MaximizeWindow { window_id: id });
-                        }
-                        KeyCode::Char('f') => {
-                            let _ = self
-                                .server_tx
-                                .try_send(ClientMessage::ToggleFullscreen { window_id: id });
-                        }
-                        KeyCode::Left => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::MoveWindow {
-                                    window_id: id,
-                                    x: win.x.saturating_sub(1),
-                                    y: win.y,
-                                });
-                            }
-                        }
-                        KeyCode::Right => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::MoveWindow {
-                                    window_id: id,
-                                    x: win.x + 1,
-                                    y: win.y,
-                                });
-                            }
-                        }
-                        KeyCode::Up => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::MoveWindow {
-                                    window_id: id,
-                                    x: win.x,
-                                    y: win.y.saturating_sub(1),
-                                });
-                            }
-                        }
-                        KeyCode::Down => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::MoveWindow {
-                                    window_id: id,
-                                    x: win.x,
-                                    y: win.y + 1,
-                                });
-                            }
-                        }
-                        KeyCode::Char('w') => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
-                                    window_id: id,
-                                    width: win.width,
-                                    height: win.height.saturating_sub(1).max(3),
-                                });
-                            }
-                        }
-                        KeyCode::Char('s') => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
-                                    window_id: id,
-                                    width: win.width,
-                                    height: win.height + 1,
-                                });
-                            }
-                        }
-                        KeyCode::Char('a') => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
-                                    window_id: id,
-                                    width: win.width.saturating_sub(1).max(10),
-                                    height: win.height,
-                                });
-                            }
-                        }
-                        KeyCode::Char('d') => {
-                            if let Some(win) = self.windows.get(&id) {
-                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
-                                    window_id: id,
-                                    width: win.width + 1,
-                                    height: win.height,
-                                });
-                            }
-                        }
-                        _ => {}
-                    }
-                }
-            }
         }
         Ok(false)
     }
@@ -957,7 +722,6 @@ impl Client {
                     HitTarget::MenuLabel(m) => {
                         if btn == MouseButton::Left {
                             self.menu = if self.menu == m { Menu::None } else { m };
-                            self.mode = Mode::Desktop;
                         }
                     }
                     HitTarget::MenuItem(m, idx) => {
@@ -1079,8 +843,7 @@ impl Client {
                                 self.last_click = Some((id, now));
 
                                 // Start dragging or resizing
-                                let is_mgmt = self.mode == Mode::Desktop
-                                    || mouse.modifiers.contains(KeyModifiers::CONTROL);
+                                let is_mgmt = mouse.modifiers.contains(KeyModifiers::CONTROL);
                                 let is_resize = matches!(target, HitTarget::WindowResize(_))
                                     || (is_mgmt
                                         && mouse.column >= win.x + win.width - 2
@@ -1142,8 +905,7 @@ impl Client {
                     }
                     HitTarget::None => {
                         if btn == MouseButton::Right
-                            && (self.mode == Mode::Desktop
-                                || mouse.modifiers.contains(KeyModifiers::CONTROL))
+                            && mouse.modifiers.contains(KeyModifiers::CONTROL)
                         {
                             let width = DEFAULT_TERM_WIDTH + 2;
                             let height = DEFAULT_TERM_HEIGHT + 2;
@@ -1643,20 +1405,12 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                 // --- MENU BAR ---
                 if !has_fullscreen {
                     let menu_rect = Rect::new(0, 0, size.width, 1);
-                    let menu_style = if client.mode == Mode::Desktop {
-                        Style::default()
-                            .bg(Color::Rgb(50, 50, 100))
-                            .fg(Color::White)
-                    } else {
-                        Style::default().bg(Color::Rgb(20, 20, 40)).fg(Color::Gray)
-                    };
+                    let menu_style = Style::default()
+                        .bg(Color::Rgb(50, 50, 100))
+                        .fg(Color::White);
                     f.render_widget(Block::default().style(menu_style), menu_rect);
 
-                    let menus = [
-                        (Menu::File, " File "),
-                        (Menu::Window, " Window "),
-                        (Menu::View, " View "),
-                    ];
+                    let menus = [(Menu::File, " File "), (Menu::Window, " Window ")];
 
                     let mut x_offset = 2;
                     for (m, label) in menus {
@@ -1665,10 +1419,8 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                                 .bg(Color::White)
                                 .fg(Color::Black)
                                 .add_modifier(Modifier::BOLD)
-                        } else if client.mode == Mode::Desktop {
-                            Style::default().fg(Color::White)
                         } else {
-                            Style::default().fg(Color::Gray)
+                            Style::default().fg(Color::White)
                         };
                         f.render_widget(
                             Paragraph::new(label).style(style),
@@ -1694,7 +1446,6 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                                     " Fullscreen (F)   ",
                                     " Tile Grid (G)    ",
                                 ],
-                                Menu::View => vec![" Toggle Desktop (F12) "],
                                 _ => vec![],
                             };
 
@@ -1727,17 +1478,6 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                         }
                         x_offset += label.len() as u16 + 2;
                     }
-                }
-
-                if client.mode == Mode::Terminal {
-                    let hint = " [F12] Desktop Mode ";
-                    let hint_x = size
-                        .width
-                        .saturating_sub(hint.len() as u16 + DESKBAR_WIDTH + 2);
-                    f.render_widget(
-                        Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
-                        Rect::new(hint_x, 0, hint.len() as u16, 1),
-                    );
                 }
 
                 // --- DESKBAR (Overlay, Dynamic Height) ---
