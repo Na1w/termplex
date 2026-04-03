@@ -283,7 +283,7 @@ impl ServerState {
                     height: win.rect.height,
                     command,
                     args,
-                    title: win.title.clone(),
+                    title: Some(win.title.clone()),
                 });
             }
         }
@@ -553,7 +553,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                 height: DEFAULT_HEIGHT,
                 command: None,
                 args: vec![],
-                title: "Terminal 1".to_string(),
+                title: None,
             },
             effective_screen_size,
         );
@@ -579,10 +579,10 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                     windows,
                 };
 
-                if let Some(tx) = client_writers.get(&id) {
-                    if let Ok(data) = encode_message(&welcome) {
-                        let _ = tx.try_send(data);
-                    }
+                if let Some(tx) = client_writers.get(&id)
+                    && let Ok(data) = encode_message(&welcome)
+                {
+                    let _ = tx.try_send(data);
                 }
             }
 
@@ -648,7 +648,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             height: actual_height,
                             command,
                             args,
-                            title: "New Terminal".to_string(),
+                            title: None,
                         };
 
                         if let Ok(_id) = spawn_window(
@@ -1268,13 +1268,13 @@ fn spawn_window(
             config.args,
             tx,
             screen_size,
-            Some(config.title),
+            config.title,
         )?
     };
 
     // Spawn handler for this window's terminal events
     let screen_tx = event_tx.clone();
-    std::thread::spawn(move || {
+    tokio::spawn(async move {
         while let Ok(event) = rx.recv() {
             match event {
                 TermEvent::Update => {

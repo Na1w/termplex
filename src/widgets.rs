@@ -21,19 +21,20 @@ impl<'a> TerminalWidget<'a> {
 impl<'a> Widget for TerminalWidget<'a> {
     fn render(self, area: Rect, buf: &mut Buffer) {
         let win = &self.state;
-        let inner_height = area.height as usize;
-        let inner_width = area.width as usize;
+        let visible_height = area.height as usize;
+        let visible_width = area.width as usize;
+        let full_width = win.width.saturating_sub(2) as usize;
 
-        for row in 0..inner_height {
-            for col in 0..inner_width {
+        // Calculate where the visible area is relative to the terminal's top-left (1,1 inside border)
+        let col_offset = area.x.saturating_sub(win.x + 1) as usize;
+        let row_offset = area.y.saturating_sub(win.y + 1) as usize;
+
+        for row in 0..visible_height {
+            for col in 0..visible_width {
                 let x = area.x + col as u16;
                 let y = area.y + row as u16;
 
-                if x >= area.right() || y >= area.bottom() {
-                    continue;
-                }
-
-                let idx = row * inner_width + col;
+                let idx = (row + row_offset) * full_width + (col + col_offset);
                 let cell = win.screen.get(idx).copied().unwrap_or(Cell::default());
 
                 let style = Style::default()
@@ -93,9 +94,9 @@ impl<'a> Widget for TerminalWidget<'a> {
         if let Some((cursor_row, cursor_col)) = win.cursor_pos
             && win.cursor_visible
         {
-            let x = area.x + cursor_col;
-            let y = area.y + cursor_row;
-            if x < area.right() && y < area.bottom() && buf.area.contains((x, y).into()) {
+            let x = (win.x + 1) + cursor_col;
+            let y = (win.y + 1) + cursor_row;
+            if area.contains((x, y).into()) {
                 let style = buf[(x, y)].style();
                 buf[(x, y)].set_style(style.add_modifier(Modifier::REVERSED));
             }

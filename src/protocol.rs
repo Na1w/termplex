@@ -78,7 +78,7 @@ pub struct WindowConfig {
     pub height: u16,
     pub command: Option<String>,
     pub args: Vec<String>,
-    pub title: String,
+    pub title: Option<String>,
 }
 
 /// A complete layout of windows
