@@ -23,8 +23,8 @@ fn debug_log(msg: &str) {
     }
 }
 
-const DEFAULT_WIDTH: u16 = 80;
-const DEFAULT_HEIGHT: u16 = 24;
+const DEFAULT_WIDTH: u16 = 82;
+const DEFAULT_HEIGHT: u16 = 26;
 const MIN_WIDTH: u16 = 10;
 const MIN_HEIGHT: u16 = 3;
 const SCROLLBACK_SIZE: usize = 3000;

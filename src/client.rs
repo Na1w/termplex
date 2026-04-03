@@ -1031,8 +1031,8 @@ impl Client {
                             {
                                 let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
                                     window_id: id,
-                                    width: 80,
-                                    height: 24,
+                                    width: 82,
+                                    height: 26,
                                 });
                                 return Ok(false);
                             }
