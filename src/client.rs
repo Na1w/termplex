@@ -849,7 +849,8 @@ impl Client {
             let rel_y = mouse.row.saturating_sub(win.y + 1);
 
             // Only send mouse sequences to the server if the application requested them
-            if win.mouse_reporting {
+            // Allow Shift to bypass this for local selection
+            if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
                 let s_rel_x = rel_x + 1;
                 let s_rel_y = rel_y + 1;
 

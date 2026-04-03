@@ -219,7 +219,7 @@ impl ServerState {
                 let (row, col) = s.cursor_position();
                 Some((row, col))
             };
-            let mouse = s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+            let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
             (pos, mouse)
         };
 
@@ -353,7 +353,7 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
             let (row, col) = s.cursor_position();
             Some((row, col))
         };
-        let mouse = s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+        let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
         (pos, mouse)
     };
 
