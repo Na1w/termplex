@@ -10,8 +10,9 @@ use crossterm::{
 use ratatui::{
     Terminal,
     backend::CrosstermBackend,
-    layout::Rect,
+    layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
+    text::Line,
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::HashMap;
@@ -1018,9 +1019,24 @@ impl Client {
                         && mouse.row < rect.y + rect.height
                     {
                         let is_title = mouse.row == rect.y;
+                        let is_bottom = mouse.row == rect.y + rect.height - 1;
                         let is_resize = !win.minimized
                             && mouse.column == rect.x + rect.width - 1
                             && mouse.row == rect.y + rect.height - 1;
+
+                        if is_bottom && !is_resize {
+                            // Check for click on [D] reset button (last 5 chars of bottom border)
+                            if mouse.column >= rect.x + rect.width.saturating_sub(5)
+                                && mouse.column < rect.x + rect.width - 1
+                            {
+                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
+                                    window_id: id,
+                                    width: 80,
+                                    height: 24,
+                                });
+                                return Ok(false);
+                            }
+                        }
 
                         if is_title {
                             // Check for double click to rename
@@ -1323,8 +1339,14 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             .title(full_title)
                             .style(Style::default().bg(Color::Rgb(40, 40, 60)))
                     } else {
+                        let size_text = format!(
+                            " {}x{} [D] ",
+                            win.width.saturating_sub(2),
+                            win.height.saturating_sub(2)
+                        );
                         Block::default()
                             .title(full_title)
+                            .title_bottom(Line::from(size_text).alignment(Alignment::Right))
                             .borders(Borders::ALL)
                             .border_style(border_style)
                             .style(Style::default().bg(Color::Black))
