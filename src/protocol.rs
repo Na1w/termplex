@@ -53,6 +53,9 @@ pub enum ClientMessage {
     /// Scroll request
     Scroll { window_id: usize, amount: i32 },
 
+    /// Scroll to absolute offset
+    ScrollTo { window_id: usize, offset: usize },
+
     /// Request layout save
     SaveLayout { path: String },
 
@@ -163,6 +166,7 @@ pub struct WindowState {
     pub running: bool,
     pub exit_code: Option<i32>,
     pub scroll_offset: usize,
+    pub scrollback_size: usize,
     /// Screen content - flat 1D grid of cells (row-major)
     pub screen: Vec<Cell>,
     /// Cursor position (row, col)
@@ -205,6 +209,10 @@ pub enum ServerMessage {
         cells: Vec<(usize, Cell)>,
         /// New cursor position
         cursor_pos: Option<(u16, u16)>,
+        /// Current scrollback size
+        scrollback_size: usize,
+        /// Current scroll offset
+        scroll_offset: usize,
     },
 
     /// Pane captured content
@@ -225,7 +233,8 @@ pub enum ServerMessage {
 
 /// Wraps a message with length prefix for TCP framing
 pub fn encode_message<T: Serialize>(msg: &T) -> anyhow::Result<Vec<u8>> {
-    let encoded = bincode::serialize(msg)?;
+    let config = bincode::config::standard().with_fixed_int_encoding();
+    let encoded = bincode::serde::encode_to_vec(msg, config)?;
     let len = encoded.len() as u32;
     let mut result = Vec::with_capacity(4 + encoded.len());
     result.extend_from_slice(&len.to_be_bytes());
@@ -243,8 +252,9 @@ pub fn decode_message<T: for<'de> Deserialize<'de>>(buf: &[u8]) -> anyhow::Resul
     if buf.len() < 4 + len {
         anyhow::bail!("Buffer too small for message");
     }
-    let msg: T = bincode::deserialize(&buf[4..4 + len])?;
-    Ok((msg, 4 + len))
+    let config = bincode::config::standard().with_fixed_int_encoding();
+    let (msg, read_len) = bincode::serde::decode_from_slice::<T, _>(&buf[4..4 + len], config)?;
+    Ok((msg, 4 + read_len))
 }
 
 /// Default TCP port for termplex

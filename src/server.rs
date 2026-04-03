@@ -41,6 +41,7 @@ struct WindowInfo {
     terminal: Terminal,
     last_screen: Vec<Cell>,
     last_cursor_pos: Option<(u16, u16)>,
+    last_scrollback_size: usize,
     fullscreen: bool,
 }
 
@@ -48,6 +49,7 @@ impl WindowInfo {
     fn update_last_state(&mut self, ws: &WindowState) {
         self.last_screen = ws.screen.clone();
         self.last_cursor_pos = ws.cursor_pos;
+        self.last_scrollback_size = ws.scrollback_size;
     }
 }
 
@@ -107,7 +109,7 @@ impl ServerState {
         let rect = Rect::new(x, y, width, height);
 
         let rows = rect.height.saturating_sub(2);
-        let cols = rect.width.saturating_sub(2);
+        let cols = rect.width.saturating_sub(3);
 
         let terminal = Terminal::new(rows, cols, _tx, command.clone(), args.clone())?;
 
@@ -124,6 +126,7 @@ impl ServerState {
             terminal,
             last_screen: Vec::new(),
             last_cursor_pos: None,
+            last_scrollback_size: 0,
             fullscreen: false,
         };
 
@@ -167,7 +170,11 @@ impl ServerState {
         let exit_code = *win.terminal.exit_code.lock().unwrap();
 
         let inner_height = win.rect.height.saturating_sub(2) as usize;
-        let inner_width = win.rect.width.saturating_sub(2) as usize;
+        let inner_width = win.rect.width.saturating_sub(3) as usize;
+
+        let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
+        let scrollback_size = total_lines.saturating_sub(inner_height).min(SCROLLBACK_SIZE);
+
         let total_cells = inner_width * inner_height;
 
         // Get screen content
@@ -243,6 +250,7 @@ impl ServerState {
             running,
             exit_code,
             scroll_offset: win.scroll_offset,
+            scrollback_size,
             screen,
             cursor_pos,
             cursor_visible: !win.minimized && win.focused && running,
@@ -301,7 +309,11 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
     let exit_code = *win.terminal.exit_code.lock().unwrap();
 
     let inner_height = win.rect.height.saturating_sub(2) as usize;
-    let inner_width = win.rect.width.saturating_sub(2) as usize;
+    let inner_width = win.rect.width.saturating_sub(3) as usize;
+
+    let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
+    let scrollback_size = total_lines.saturating_sub(inner_height).min(SCROLLBACK_SIZE);
+
     let total_cells = inner_width * inner_height;
 
     // Get screen content
@@ -369,6 +381,7 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
         running,
         exit_code,
         scroll_offset: win.scroll_offset,
+        scrollback_size,
         screen,
         cursor_pos,
         cursor_visible: !win.minimized && win.focused && running,
@@ -485,9 +498,13 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                         if accum.len() < 4 + len {
                                             break;
                                         }
-                                        if let Ok(msg) = bincode::deserialize::<ClientMessage>(
-                                            &accum[4..4 + len],
-                                        ) {
+                                        let config = bincode::config::legacy();
+                                        if let Ok((msg, _)) =
+                                            bincode::serde::decode_from_slice::<ClientMessage, _>(
+                                                &accum[4..4 + len],
+                                                config,
+                                            )
+                                        {
                                             let _ = read_tx
                                                 .send(ServerEvent::ClientMessage(cid, msg))
                                                 .await;
@@ -851,7 +868,9 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 let _ = win.terminal.write(&data);
                                 let new_ws = build_window_state(win, &window_order);
 
-                                if win.last_screen.len() != new_ws.screen.len() {
+                                if win.last_screen.len() != new_ws.screen.len()
+                                    || win.last_scrollback_size != new_ws.scrollback_size
+                                {
                                     win.update_last_state(&new_ws);
                                     Some(ServerMessage::WindowUpdate { window: new_ws })
                                 } else {
@@ -872,6 +891,8 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                             window_id,
                                             cells: diff_cells,
                                             cursor_pos: new_ws.cursor_pos,
+                                            scrollback_size: new_ws.scrollback_size,
+                                            scroll_offset: new_ws.scroll_offset,
                                         })
                                     } else {
                                         None
@@ -1221,7 +1242,12 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             let mut st = state.lock().unwrap();
                             let window_order = st.window_order.clone();
                             if let Some(win) = st.windows.get_mut(&window_id) {
-                                let max_scroll = SCROLLBACK_SIZE;
+                                let inner_height = win.rect.height.saturating_sub(2) as usize;
+                                let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
+                                let max_scroll = total_lines
+                                    .saturating_sub(inner_height)
+                                    .min(SCROLLBACK_SIZE);
+
                                 win.scroll_offset = (win.scroll_offset as i32 + amount)
                                     .clamp(0, max_scroll as i32)
                                     as usize;
@@ -1233,7 +1259,9 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                                 let new_ws = build_window_state(win, &window_order);
 
-                                if win.last_screen.len() != new_ws.screen.len() {
+                                if win.last_screen.len() != new_ws.screen.len()
+                                    || win.last_scrollback_size != new_ws.scrollback_size
+                                {
                                     win.update_last_state(&new_ws);
                                     Some(ServerMessage::WindowUpdate { window: new_ws })
                                 } else {
@@ -1254,6 +1282,67 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                             window_id,
                                             cells: diff_cells,
                                             cursor_pos: new_ws.cursor_pos,
+                                            scrollback_size: new_ws.scrollback_size,
+                                            scroll_offset: new_ws.scroll_offset,
+                                        })
+                                    } else {
+                                        None
+                                    }
+                                }
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(msg) = msg {
+                            broadcast_to_all(&client_writers, &msg);
+                        }
+                    }
+
+                    ClientMessage::ScrollTo { window_id, offset } => {
+                        let msg = {
+                            let mut st = state.lock().unwrap();
+                            let window_order = st.window_order.clone();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                let inner_height = win.rect.height.saturating_sub(2) as usize;
+                                let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
+                                let max_scroll = total_lines
+                                    .saturating_sub(inner_height)
+                                    .min(SCROLLBACK_SIZE);
+
+                                win.scroll_offset = offset.min(max_scroll);
+
+                                {
+                                    let mut parser = win.terminal.parser.lock().unwrap();
+                                    parser.screen_mut().set_scrollback(win.scroll_offset);
+                                }
+
+                                let new_ws = build_window_state(win, &window_order);
+
+                                if win.last_screen.len() != new_ws.screen.len()
+                                    || win.last_scrollback_size != new_ws.scrollback_size
+                                {
+                                    win.update_last_state(&new_ws);
+                                    Some(ServerMessage::WindowUpdate { window: new_ws })
+                                } else {
+                                    let mut diff_cells = Vec::new();
+                                    for (idx, (old, new)) in
+                                        win.last_screen.iter().zip(new_ws.screen.iter()).enumerate()
+                                    {
+                                        if old != new {
+                                            diff_cells.push((idx, *new));
+                                        }
+                                    }
+                                    let cursor_changed = win.last_cursor_pos != new_ws.cursor_pos;
+                                    win.last_screen = new_ws.screen;
+                                    win.last_cursor_pos = new_ws.cursor_pos;
+
+                                    if !diff_cells.is_empty() || cursor_changed {
+                                        Some(ServerMessage::ScreenDiff {
+                                            window_id,
+                                            cells: diff_cells,
+                                            cursor_pos: new_ws.cursor_pos,
+                                            scrollback_size: new_ws.scrollback_size,
+                                            scroll_offset: new_ws.scroll_offset,
                                         })
                                     } else {
                                         None
@@ -1277,8 +1366,10 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                     if let Some(win) = st.windows.get_mut(&window_id) {
                         let new_ws = build_window_state(win, &window_order);
 
-                        // If screens have different sizes, we must send a full update
-                        if win.last_screen.len() != new_ws.screen.len() {
+                        // If screens have different sizes, or scrollback changed, we must send a full update
+                        if win.last_screen.len() != new_ws.screen.len()
+                            || win.last_scrollback_size != new_ws.scrollback_size
+                        {
                             win.update_last_state(&new_ws);
                             Some(ServerMessage::WindowUpdate { window: new_ws })
                         } else {
@@ -1302,9 +1393,10 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     window_id,
                                     cells: diff_cells,
                                     cursor_pos: new_ws.cursor_pos,
+                                    scrollback_size: new_ws.scrollback_size,
+                                    scroll_offset: new_ws.scroll_offset,
                                 })
-                            } else {
-                                None
+                            } else {                                None
                             }
                         }
                     } else {

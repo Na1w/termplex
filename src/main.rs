@@ -88,8 +88,9 @@ async fn run_capture_command(host: &str, port: u16, window_id: Option<usize>) ->
                 break;
             }
 
-            if let Ok(msg) = bincode::deserialize::<ServerMessage>(&accum[4..4 + len]) {
-                match msg {
+            let config = bincode::config::standard().with_fixed_int_encoding();
+            match bincode::serde::decode_from_slice::<ServerMessage, _>(&accum[4..4 + len], config) {
+                Ok((msg, _)) => match msg {
                     ServerMessage::FullCaptured { text } => {
                         print!("{}", text);
                         return Ok(());
@@ -102,6 +103,9 @@ async fn run_capture_command(host: &str, port: u16, window_id: Option<usize>) ->
                         anyhow::bail!("Server error: {}", message);
                     }
                     _ => {}
+                },
+                Err(e) => {
+                    eprintln!("Bincode deserialization error in main: {}", e);
                 }
             }
             accum.drain(0..4 + len);

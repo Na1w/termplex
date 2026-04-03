@@ -26,7 +26,7 @@ impl Window {
         args: Vec<String>,
     ) -> anyhow::Result<Self> {
         let rows = rect.height.saturating_sub(2);
-        let cols = rect.width.saturating_sub(2);
+        let cols = rect.width.saturating_sub(3);
         let terminal = Terminal::new(rows, cols, event_tx, command.clone(), args.clone())?;
 
         Ok(Self {
@@ -45,7 +45,7 @@ impl Window {
     pub fn resize(&mut self, rect: Rect) -> anyhow::Result<()> {
         self.rect = rect;
         let rows = rect.height.saturating_sub(2);
-        let cols = rect.width.saturating_sub(2);
+        let cols = rect.width.saturating_sub(3);
         self.terminal.resize(rows, cols)?;
         Ok(())
     }

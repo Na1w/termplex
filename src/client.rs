@@ -86,6 +86,7 @@ enum HitTarget {
     FullscreenButton(usize),
     SoloButton(usize),
     ResetButton(usize),
+    WindowScrollbar(usize),
 }
 
 struct Client {
@@ -98,6 +99,7 @@ struct Client {
     selection: Option<Selection>,
     pending_selection: Option<(usize, u16, u16)>,
     drag_state: Option<DragState>,
+    scrollbar_drag: Option<usize>,
     rename_state: Option<RenameState>,
     last_screen_size: Rect,
     last_mouse_pos: (u16, u16),
@@ -119,6 +121,7 @@ impl Client {
             selection: None,
             pending_selection: None,
             drag_state: None,
+            scrollbar_drag: None,
             rename_state: None,
             last_screen_size: screen_size,
             last_mouse_pos: (0, 0),
@@ -217,6 +220,8 @@ impl Client {
                             } else {
                                 HitTarget::WindowBorder(id)
                             }
+                        } else if x == win_x + win_width - 2 {
+                            HitTarget::WindowScrollbar(id)
                         } else {
                             HitTarget::WindowContent(id)
                         };
@@ -569,6 +574,8 @@ impl Client {
                     window_id,
                     cells,
                     cursor_pos,
+                    scrollback_size,
+                    scroll_offset,
                 } => {
                     if let Some(win) = self.windows.get_mut(&window_id) {
                         for (idx, cell) in cells {
@@ -577,6 +584,8 @@ impl Client {
                             }
                         }
                         win.cursor_pos = cursor_pos;
+                        win.scrollback_size = scrollback_size;
+                        win.scroll_offset = scroll_offset;
                     }
                 }
                 ServerMessage::PaneCaptured { window_id, text } => {
@@ -973,7 +982,7 @@ impl Client {
                         let rel_x = mouse.column.saturating_sub(win.x + 1);
                         let rel_y = mouse.row.saturating_sub(win.y + 1);
 
-                        if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        if win.mouse_reporting {
                             let sgr_btn = match btn {
                                 MouseButton::Left => 0,
                                 MouseButton::Middle => 1,
@@ -995,6 +1004,42 @@ impl Client {
                                 data,
                             });
                             self.clipboard.clear();
+                        }
+                    }
+                    HitTarget::WindowScrollbar(id) => {
+                        self.active_window_id = Some(id);
+                        let _ = self
+                            .server_tx
+                            .try_send(ClientMessage::FocusWindow { window_id: id });
+                        if btn == MouseButton::Left {
+                            self.scrollbar_drag = Some(id);
+                            let win = self.windows.get(&id).unwrap();
+                            let inner_h = win.height.saturating_sub(2);
+                            let scrollback = win.scrollback_size;
+                            if inner_h > 0 && scrollback > 0 {
+                                // Calculate thumb height to match rendering
+                                let total_h = (inner_h as usize + scrollback).max(1);
+                                let thumb_h = ((inner_h as f32 * inner_h as f32) / total_h as f32)
+                                    .round() as u16;
+                                let thumb_h = thumb_h.clamp(1, inner_h);
+                                let available_track = inner_h.saturating_sub(thumb_h);
+
+                                if available_track > 0 {
+                                    let rel_y = mouse.row.saturating_sub(win.y + 1);
+                                    let rel_y_clamped = rel_y.min(available_track);
+                                    let ratio = 1.0 - (rel_y_clamped as f32 / available_track as f32);
+                                    let offset = (ratio * scrollback as f32).round() as usize;
+
+                                    if let Some(win_mut) = self.windows.get_mut(&id) {
+                                        win_mut.scroll_offset = offset;
+                                    }
+                                    let _ = self.server_tx.try_send(ClientMessage::ScrollTo {
+                                        window_id: id,
+                                        offset,
+                                    });
+                                    return Ok(false);
+                                }
+                            }
                         }
                     }
                     HitTarget::WindowTitle(id)
@@ -1110,9 +1155,46 @@ impl Client {
                 }
             }
             MouseEventKind::Drag(btn) => {
+                if let Some(id) = self.scrollbar_drag {
+                    if btn == MouseButton::Left {
+                        if let Some(win) = self.windows.get(&id) {
+                            let inner_h = win.height.saturating_sub(2);
+                            let scrollback = win.scrollback_size;
+                            if inner_h > 0 && scrollback > 0 {
+                                let total_h = (inner_h as usize + scrollback).max(1);
+                                let thumb_h = ((inner_h as f32 * inner_h as f32) / total_h as f32)
+                                    .round() as u16;
+                                let thumb_h = thumb_h.clamp(1, inner_h);
+                                let available_track = inner_h.saturating_sub(thumb_h);
+
+                                if available_track > 0 {
+                                    let rel_y = mouse.row.saturating_sub(win.y + 1);
+                                    let rel_y_clamped = rel_y.min(available_track);
+                                    let ratio =
+                                        1.0 - (rel_y_clamped as f32 / available_track as f32);
+                                    let offset = (ratio * scrollback as f32).round() as usize;
+
+                                    if offset != win.scroll_offset {
+                                        // Optimistic update for immediate visual feedback
+                                        if let Some(win_mut) = self.windows.get_mut(&id) {
+                                            win_mut.scroll_offset = offset;
+                                        }
+                                        let _ = self.server_tx.try_send(ClientMessage::ScrollTo {
+                                            window_id: id,
+                                            offset,
+                                        });
+                                        return Ok(false);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    return Ok(false);
+                }
+
                 if let HitTarget::WindowContent(id) = target {
                     let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if win.mouse_reporting {
                         let rel_x = mouse.column.saturating_sub(win.x + 1);
                         let rel_y = mouse.row.saturating_sub(win.y + 1);
                         let sgr_btn = match btn {
@@ -1152,6 +1234,7 @@ impl Client {
             }
             MouseEventKind::Up(btn) => {
                 if btn == MouseButton::Left {
+                    self.scrollbar_drag = None;
                     if let Some(sel) = self.selection
                         && let Some(win) = self.windows.get(&sel.window_id)
                         && sel.start != sel.end
@@ -1185,7 +1268,7 @@ impl Client {
 
                 if let HitTarget::WindowContent(id) = target {
                     let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if win.mouse_reporting {
                         let sgr_btn = match btn {
                             MouseButton::Left => 0,
                             MouseButton::Middle => 1,
@@ -1208,7 +1291,7 @@ impl Client {
             MouseEventKind::ScrollUp => {
                 if let HitTarget::WindowContent(id) = target {
                     let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if win.mouse_reporting {
                         let data = format!(
                             "\x1b[<64;{};{}M",
                             mouse.column.saturating_sub(win.x + 1) + 1,
@@ -1230,7 +1313,7 @@ impl Client {
             MouseEventKind::ScrollDown => {
                 if let HitTarget::WindowContent(id) = target {
                     let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                    if win.mouse_reporting {
                         let data = format!(
                             "\x1b[<65;{};{}M",
                             mouse.column.saturating_sub(win.x + 1) + 1,
@@ -1314,10 +1397,19 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                         if accum.len() < 4 + len {
                             break;
                         }
-                        if let Ok(msg) = bincode::deserialize::<ServerMessage>(&accum[4..4 + len])
-                            && tx_server.send(AppEvent::Server(msg)).await.is_err()
-                        {
-                            break;
+                        let config = bincode::config::standard().with_fixed_int_encoding();
+                        match bincode::serde::decode_from_slice::<ServerMessage, _>(
+                            &accum[4..4 + len],
+                            config,
+                        ) {
+                            Ok((msg, _)) => {
+                                if tx_server.send(AppEvent::Server(msg)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("Bincode deserialization error: {}", e);
+                            }
                         }
                         accum.drain(0..4 + len);
                     }
@@ -1479,6 +1571,49 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                                 widget = widget.with_selection(Some((sel.start, sel.end)));
                             }
                             f.render_widget(widget, inner_area);
+                        }
+
+                        // Scrollbar
+                        let scroll_x = win.x + win.width - 2;
+                        let inner_h = win.height.saturating_sub(2);
+                        if inner_h > 0 && !win.minimized {
+                            for i in 0..inner_h {
+                                let sy = win.y + 1 + i;
+                                if window_area.contains((scroll_x, sy).into()) {
+                                    f.buffer_mut()[(scroll_x, sy)]
+                                        .set_char('│')
+                                        .set_style(Style::default().fg(Color::DarkGray));
+                                }
+                            }
+
+                            // Scroll handle (thumb) - Proportional
+                            let scrollback = win.scrollback_size;
+                            let total_h = (inner_h as usize + scrollback).max(1);
+
+                            // Thumb height proportional to visible area
+                            let thumb_h_f = (inner_h as f32 * inner_h as f32) / total_h as f32;
+                            let thumb_h = (thumb_h_f.ceil() as u16).clamp(1, inner_h);
+
+                            // Thumb position mapping scrollback_size to available track
+                            let thumb_y = if scrollback > 0 {
+                                let available_track = inner_h.saturating_sub(thumb_h);
+                                let scroll_ratio = win.scroll_offset as f32 / scrollback as f32;
+                                // 0 offset means bottom, so ratio 0.0 -> offset = available_track
+                                let thumb_offset =
+                                    ((1.0 - scroll_ratio) * available_track as f32).round() as u16;
+                                (win.y + 1) + thumb_offset
+                            } else {
+                                win.y + 1
+                            };
+
+                            for h in 0..thumb_h {
+                                let sy = thumb_y + h;
+                                if window_area.contains((scroll_x, sy).into()) {
+                                    f.buffer_mut()[(scroll_x, sy)]
+                                        .set_char('█')
+                                        .set_style(Style::default().fg(Color::Cyan));
+                                }
+                            }
                         }
 
                         // Resize handle

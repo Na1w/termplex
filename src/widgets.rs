@@ -32,7 +32,7 @@ impl<'a> Widget for TerminalWidget<'a> {
         let win = &self.state;
         let visible_height = area.height as usize;
         let visible_width = area.width as usize;
-        let full_width = win.width.saturating_sub(2) as usize;
+        let full_width = win.width.saturating_sub(3) as usize;
 
         // Calculate where the visible area is relative to the terminal's top-left (1,1 inside border)
         let col_offset = area.x.saturating_sub(win.x + 1) as usize;

@@ -22,6 +22,7 @@ pub struct Terminal {
     pub running: Arc<AtomicBool>,
     pub exit_code: Arc<Mutex<Option<i32>>>,
     pub child_pid: u32,
+    pub total_lines: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Terminal {
@@ -78,6 +79,9 @@ impl Terminal {
         let exit_code = Arc::new(Mutex::new(None));
         let exit_code_clone = exit_code.clone();
 
+        let total_lines = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
+        let total_lines_clone = total_lines.clone();
+
         let tx = event_tx.clone();
         thread::spawn(move || {
             let mut reader = reader;
@@ -86,9 +90,22 @@ impl Terminal {
                 match reader.read(&mut byte_buf) {
                     Ok(0) => break,
                     Ok(n) => {
+                        let data = &byte_buf[..n];
+                        // Count newlines to estimate history size
+                        let newlines = data.iter().filter(|&&b| b == b'\n').count();
+                        if newlines > 0 {
+                            total_lines_clone.fetch_add(newlines, Ordering::SeqCst);
+                        }
+
+                        // Check for 'Clear Scrollback' sequence: ESC [ 3 J
+                        // This is typically sent by the 'clear' command.
+                        if data.windows(4).any(|w| w == b"\x1b[3J") {
+                            total_lines_clone.store(rows as usize, Ordering::SeqCst);
+                        }
+
                         {
                             let mut p = parser_clone.lock().unwrap();
-                            p.process(&byte_buf[..n]);
+                            p.process(data);
                         }
                         let _ = tx.send(TermEvent::Update);
                     }
@@ -118,6 +135,7 @@ impl Terminal {
             running,
             exit_code,
             child_pid,
+            total_lines,
         })
     }
 
