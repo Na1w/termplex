@@ -28,6 +28,8 @@ use tokio::time::interval;
 use crate::protocol::*;
 use crate::widgets::TerminalWidget;
 
+const DESKBAR_WIDTH: u16 = 20;
+
 #[derive(Debug)]
 enum AppEvent {
     Terminal(Event),
@@ -68,6 +70,24 @@ struct Selection {
     end: (u16, u16),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HitTarget {
+    None,
+    Deskbar(usize), // window index in deskbar
+    MenuLabel(Menu),
+    MenuItem(Menu, usize),
+    WindowContent(usize),
+    WindowTitle(usize),
+    WindowBorder(usize),
+    WindowResize(usize),
+    CloseButton(usize),
+    MinimizeButton(usize),
+    MaximizeButton(usize),
+    FullscreenButton(usize),
+    SoloButton(usize),
+    ResetButton(usize),
+}
+
 struct Client {
     windows: HashMap<usize, WindowState>,
     active_window_id: Option<usize>,
@@ -83,10 +103,12 @@ struct Client {
     last_mouse_pos: (u16, u16),
     last_click: Option<(usize, std::time::Instant)>,
     server_tx: mpsc::Sender<ClientMessage>,
+    hit_map: Vec<HitTarget>,
 }
 
 impl Client {
     fn new(screen_size: Rect, server_tx: mpsc::Sender<ClientMessage>) -> Self {
+        let size = (screen_size.width as usize) * (screen_size.height as usize);
         Self {
             windows: HashMap::new(),
             active_window_id: None,
@@ -102,31 +124,185 @@ impl Client {
             last_mouse_pos: (0, 0),
             last_click: None,
             server_tx,
+            hit_map: vec![HitTarget::None; size],
         }
     }
 
-    fn get_window_at(&self, x: u16, y: u16) -> Option<(usize, bool)> {
-        // Sort by z-order (front to back)
-        let mut windows_with_z: Vec<_> = self.windows.values().collect();
-        windows_with_z.sort_by(|a, b| b.z_order.cmp(&a.z_order));
+    fn update_hit_map_size(&mut self, width: u16, height: u16) {
+        let size = (width as usize) * (height as usize);
+        if self.hit_map.len() != size {
+            self.hit_map = vec![HitTarget::None; size];
+        }
+    }
 
-        for win in windows_with_z {
-            let rect = if win.minimized {
-                Rect::new(win.x, win.y, win.width, 1)
-            } else {
-                Rect::new(win.x, win.y, win.width, win.height)
-            };
-
-            if x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height {
-                let is_terminal_area = !win.minimized
-                    && x > win.x
-                    && x < win.x + win.width - 1
-                    && y > win.y
-                    && y < win.y + win.height - 1;
-                return Some((win.id, is_terminal_area));
+    fn set_hit(&mut self, x: u16, y: u16, target: HitTarget) {
+        let w = self.last_screen_size.width;
+        let h = self.last_screen_size.height;
+        if x < w && y < h {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            if idx < self.hit_map.len() {
+                self.hit_map[idx] = target;
             }
         }
-        None
+    }
+
+    fn get_hit(&self, x: u16, y: u16) -> HitTarget {
+        let w = self.last_screen_size.width;
+        let h = self.last_screen_size.height;
+        if x < w && y < h {
+            let idx = (y as usize) * (w as usize) + (x as usize);
+            return self.hit_map.get(idx).copied().unwrap_or(HitTarget::None);
+        }
+        HitTarget::None
+    }
+
+    fn get_window_at(&self, x: u16, y: u16) -> Option<(usize, bool)> {
+        match self.get_hit(x, y) {
+            HitTarget::WindowContent(id) => Some((id, true)),
+            HitTarget::WindowTitle(id)
+            | HitTarget::WindowBorder(id)
+            | HitTarget::WindowResize(id)
+            | HitTarget::CloseButton(id)
+            | HitTarget::MinimizeButton(id)
+            | HitTarget::MaximizeButton(id)
+            | HitTarget::FullscreenButton(id)
+            | HitTarget::SoloButton(id)
+            | HitTarget::ResetButton(id) => Some((id, false)),
+            _ => None,
+        }
+    }
+
+    fn update_hit_map(&mut self) {
+        let size = self.last_screen_size;
+        self.hit_map.fill(HitTarget::None);
+
+        // --- 1. Windows (Sort by Z-order: back to front) ---
+        // Collect window data first to avoid borrow checker issues with self
+        let mut window_data: Vec<(usize, u16, u16, u16, u16, bool, usize)> = self
+            .windows
+            .values()
+            .map(|w| (w.id, w.x, w.y, w.width, w.height, w.minimized, w.z_order))
+            .collect();
+        window_data.sort_by_key(|w| w.6); // Sort by z_order back-to-front
+
+        for (id, win_x, win_y, win_width, win_height, minimized, _) in window_data {
+            if minimized {
+                // Header only
+                for x in win_x..win_x + win_width {
+                    self.set_hit(x, win_y, HitTarget::WindowTitle(id));
+                }
+                // Buttons in header
+                for x in (win_x + 2)..=(win_x + 4) {
+                    self.set_hit(x, win_y, HitTarget::CloseButton(id));
+                }
+                for x in (win_x + 6)..=(win_x + 8) {
+                    self.set_hit(x, win_y, HitTarget::MinimizeButton(id));
+                }
+                for x in (win_x + 10)..=(win_x + 12) {
+                    self.set_hit(x, win_y, HitTarget::MaximizeButton(id));
+                }
+            } else {
+                // Full window
+                for y in win_y..win_y + win_height {
+                    for x in win_x..win_x + win_width {
+                        let target = if x == win_x
+                            || x == win_x + win_width - 1
+                            || y == win_y
+                            || y == win_y + win_height - 1
+                        {
+                            if y == win_y {
+                                HitTarget::WindowTitle(id)
+                            } else if x == win_x + win_width - 1 && y == win_y + win_height - 1 {
+                                HitTarget::WindowResize(id)
+                            } else {
+                                HitTarget::WindowBorder(id)
+                            }
+                        } else {
+                            HitTarget::WindowContent(id)
+                        };
+                        self.set_hit(x, y, target);
+                    }
+                }
+                // Header Buttons
+                for x in (win_x + 2)..=(win_x + 4) {
+                    self.set_hit(x, win_y, HitTarget::CloseButton(id));
+                }
+                for x in (win_x + 6)..=(win_x + 8) {
+                    self.set_hit(x, win_y, HitTarget::MinimizeButton(id));
+                }
+                for x in (win_x + 10)..=(win_x + 12) {
+                    self.set_hit(x, win_y, HitTarget::MaximizeButton(id));
+                }
+
+                // Right-side header buttons (F, S)
+                let right_start = win_x + win_width.saturating_sub(9);
+                for x in right_start..right_start + 3 {
+                    self.set_hit(x, win_y, HitTarget::FullscreenButton(id));
+                }
+                let solo_start = win_x + win_width.saturating_sub(5);
+                for x in solo_start..solo_start + 4 {
+                    self.set_hit(x, win_y, HitTarget::SoloButton(id));
+                }
+
+                // Reset button [D] in bottom border
+                let bottom_y = win_y + win_height - 1;
+                let reset_start = win_x + win_width.saturating_sub(5);
+                for x in reset_start..(win_x + win_width - 1) {
+                    self.set_hit(x, bottom_y, HitTarget::ResetButton(id));
+                }
+            }
+        }
+
+        // --- 2. Deskbar (Always on top) ---
+        let deskbar_height = (self.windows.len() as u16 + 2).max(3);
+        let deskbar_x_start = size.width.saturating_sub(DESKBAR_WIDTH);
+        for y in 0..deskbar_height {
+            for x in deskbar_x_start..size.width {
+                let target = if y >= 1 && y < deskbar_height - 1 {
+                    HitTarget::Deskbar((y - 1) as usize)
+                } else {
+                    HitTarget::None
+                };
+                self.set_hit(x, y, target);
+            }
+        }
+
+        // --- 3. Menu Bar (Always on top) ---
+        let menus = [
+            (Menu::File, " File "),
+            (Menu::Window, " Window "),
+            (Menu::View, " View "),
+        ];
+        let mut x_offset = 2;
+        for (m, label) in menus {
+            let label_len = label.len() as u16;
+            for x in x_offset..x_offset + label_len {
+                self.set_hit(x, 0, HitTarget::MenuLabel(m));
+            }
+
+            // Dropdown contents
+            if self.menu == m {
+                let items_count = match m {
+                    Menu::File => 6,
+                    Menu::Window => 6,
+                    Menu::View => 1,
+                    _ => 0,
+                };
+                // Approximate dropdown width (matched with rendering)
+                let dw = match m {
+                    Menu::File => 18,
+                    Menu::Window => 18,
+                    Menu::View => 22,
+                    _ => 0,
+                };
+                for dy in 0..items_count {
+                    for dx in 0..dw {
+                        self.set_hit(x_offset + 1 + dx, 2 + dy as u16, HitTarget::MenuItem(m, dy));
+                    }
+                }
+            }
+            x_offset += label_len + 2;
+        }
     }
 
     fn execute_menu_item(&mut self, menu: Menu, idx: usize) -> Result<bool> {
@@ -230,6 +406,8 @@ impl Client {
             AppEvent::Terminal(ev) => match ev {
                 Event::Resize(w, h) => {
                     self.last_screen_size = Rect::new(0, 0, w, h);
+                    self.update_hit_map_size(w, h);
+                    // Report full width now that Deskbar is dynamic and overlay
                     let msg = ClientMessage::TerminalResize {
                         width: w,
                         height: h,
@@ -709,70 +887,9 @@ impl Client {
 
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<bool> {
         self.last_mouse_pos = (mouse.column, mouse.row);
+        let target = self.get_hit(mouse.column, mouse.row);
 
-        // --- 0. MENU HANDLING ---
-        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
-            if mouse.row == 0 {
-                // Clicked on the menu bar
-                if mouse.column >= 2 && mouse.column <= 7 {
-                    self.menu = if self.menu == Menu::File {
-                        Menu::None
-                    } else {
-                        Menu::File
-                    };
-                    self.mode = Mode::Desktop;
-                } else if mouse.column >= 10 && mouse.column <= 17 {
-                    self.menu = if self.menu == Menu::Window {
-                        Menu::None
-                    } else {
-                        Menu::Window
-                    };
-                    self.mode = Mode::Desktop;
-                } else if mouse.column >= 20 && mouse.column <= 25 {
-                    self.menu = if self.menu == Menu::View {
-                        Menu::None
-                    } else {
-                        Menu::View
-                    };
-                    self.mode = Mode::Desktop;
-                } else if mouse.column >= self.last_screen_size.width.saturating_sub(20) {
-                    self.mode = if self.mode == Mode::Desktop {
-                        Mode::Terminal
-                    } else {
-                        Mode::Desktop
-                    };
-                }
-                return Ok(false);
-            }
-
-            // Clicked inside a dropdown?
-            if self.menu != Menu::None {
-                let x_start = match self.menu {
-                    Menu::File => 2,
-                    Menu::Window => 10,
-                    Menu::View => 20,
-                    _ => 0,
-                };
-
-                let items_count = match self.menu {
-                    Menu::File => 6,
-                    Menu::Window => 6,
-                    Menu::View => 1,
-                    _ => 0,
-                };
-
-                if mouse.column >= x_start && mouse.row >= 1 && mouse.row <= items_count + 1 {
-                    let idx = mouse.row.saturating_sub(2) as usize;
-                    return self.execute_menu_item(self.menu, idx);
-                }
-
-                // Clicked outside dropdown
-                self.menu = Menu::None;
-            }
-        }
-
-        // --- 1. Window Management (Drag/Resize) ---
-        // This must always take precedence so a drag is not interrupted when passing over other windows.
+        // --- 0. INTERCEPT DRAGS ---
         if let Some(ref state) = self.drag_state {
             if matches!(mouse.kind, MouseEventKind::Up(_)) {
                 self.drag_state = None;
@@ -780,13 +897,11 @@ impl Client {
             }
 
             if let MouseEventKind::Drag(MouseButton::Left) = mouse.kind {
-                // Check if window still exists
                 if !self.windows.contains_key(&state.window_id) {
                     self.drag_state = None;
                     return Ok(false);
                 }
 
-                // Rate limit: only send updates every 16ms (60fps)
                 let now = std::time::Instant::now();
                 if now.duration_since(state.last_update).as_millis() < 16 {
                     return Ok(false);
@@ -798,31 +913,19 @@ impl Client {
                 if state.is_resize {
                     let new_width = (state.start_rect.width as i32 + dx).max(10) as u16;
                     let new_height = (state.start_rect.height as i32 + dy).max(3) as u16;
-                    if self
-                        .server_tx
-                        .try_send(ClientMessage::ResizeWindow {
-                            window_id: state.window_id,
-                            width: new_width,
-                            height: new_height,
-                        })
-                        .is_err()
-                    {
-                        return Ok(false);
-                    }
+                    let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
+                        window_id: state.window_id,
+                        width: new_width,
+                        height: new_height,
+                    });
                 } else {
                     let nx = (state.start_rect.x as i32 + dx).max(0) as u16;
                     let ny = (state.start_rect.y as i32 + dy).max(0) as u16;
-                    if self
-                        .server_tx
-                        .try_send(ClientMessage::MoveWindow {
-                            window_id: state.window_id,
-                            x: nx,
-                            y: ny,
-                        })
-                        .is_err()
-                    {
-                        return Ok(false);
-                    }
+                    let _ = self.server_tx.try_send(ClientMessage::MoveWindow {
+                        window_id: state.window_id,
+                        x: nx,
+                        y: ny,
+                    });
                 }
 
                 if let Some(s) = self.drag_state.as_mut() {
@@ -832,120 +935,221 @@ impl Client {
             }
         }
 
-        // --- 2. HOVER PASSTHROUGH LOGIC ---
-        // If mouse is inside ANY window's terminal area (excluding borders),
-        // we capture the event to prevent desktop logic from running.
-        if let Some((id, true)) = self.get_window_at(mouse.column, mouse.row) {
-            // Any click in terminal area focuses the window
-            if matches!(mouse.kind, MouseEventKind::Down(_)) {
-                self.active_window_id = Some(id);
-                let _ = self
-                    .server_tx
-                    .try_send(ClientMessage::FocusWindow { window_id: id });
-            }
-
-            let win = self.windows.get(&id).unwrap();
-            let rel_x = mouse.column.saturating_sub(win.x + 1);
-            let rel_y = mouse.row.saturating_sub(win.y + 1);
-
-            // Only send mouse sequences to the server if the application requested them
-            // Allow Shift to bypass this for local selection
-            if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                let s_rel_x = rel_x + 1;
-                let s_rel_y = rel_y + 1;
-
-                match mouse.kind {
-                    MouseEventKind::Down(btn)
-                    | MouseEventKind::Up(btn)
-                    | MouseEventKind::Drag(btn) => {
-                        let cb = match btn {
-                            MouseButton::Left => 0,
-                            MouseButton::Middle => 1,
-                            MouseButton::Right => 2,
-                        };
-                        let cb = if matches!(mouse.kind, MouseEventKind::Drag(_)) {
-                            cb + 32
-                        } else {
-                            cb
-                        };
-                        let suffix = if matches!(mouse.kind, MouseEventKind::Up(_)) {
-                            'm'
-                        } else {
-                            'M'
-                        };
-                        let data =
-                            format!("\x1b[<{};{};{}{}", cb, s_rel_x, s_rel_y, suffix).into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
+        // --- 1. HANDLE CLICKS BASED ON HIT MAP ---
+        match mouse.kind {
+            MouseEventKind::Down(btn) => {
+                match target {
+                    HitTarget::MenuLabel(m) => {
+                        if btn == MouseButton::Left {
+                            self.menu = if self.menu == m { Menu::None } else { m };
+                            self.mode = Mode::Desktop;
+                        }
                     }
-                    MouseEventKind::ScrollUp => {
-                        let data = format!("\x1b[<64;{};{}M", s_rel_x, s_rel_y).into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
+                    HitTarget::MenuItem(m, idx) => {
+                        if btn == MouseButton::Left {
+                            return self.execute_menu_item(m, idx);
+                        }
                     }
-                    MouseEventKind::ScrollDown => {
-                        let data = format!("\x1b[<65;{};{}M", s_rel_x, s_rel_y).into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
+                    HitTarget::Deskbar(idx) => {
+                        if btn == MouseButton::Left {
+                            let mut windows_sorted: Vec<_> = self.windows.values().collect();
+                            windows_sorted.sort_by_key(|w| w.id);
+                            if let Some(win) = windows_sorted.get(idx) {
+                                let wid = win.id;
+                                self.active_window_id = Some(wid);
+                                let _ = self
+                                    .server_tx
+                                    .try_send(ClientMessage::FocusWindow { window_id: wid });
+                            }
+                        }
                     }
-                    _ => {}
+                    HitTarget::WindowContent(id) => {
+                        self.active_window_id = Some(id);
+                        let _ = self
+                            .server_tx
+                            .try_send(ClientMessage::FocusWindow { window_id: id });
+
+                        if btn == MouseButton::Left {
+                            let win = self.windows.get(&id).unwrap();
+                            let rel_x = mouse.column.saturating_sub(win.x + 1);
+                            let rel_y = mouse.row.saturating_sub(win.y + 1);
+
+                            if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT)
+                            {
+                                let data =
+                                    format!("\x1b[<0;{};{}M", rel_x + 1, rel_y + 1).into_bytes();
+                                let _ = self.server_tx.try_send(ClientMessage::Input {
+                                    window_id: id,
+                                    data,
+                                });
+                            } else {
+                                self.pending_selection = Some((id, rel_y, rel_x));
+                                self.selection = None;
+                            }
+                        } else if btn == MouseButton::Right {
+                            if !self.clipboard.is_empty() {
+                                let data = self.clipboard.clone().into_bytes();
+                                let _ = self.server_tx.try_send(ClientMessage::Input {
+                                    window_id: id,
+                                    data,
+                                });
+                                self.clipboard.clear();
+                            }
+                        }
+                    }
+                    HitTarget::WindowTitle(id)
+                    | HitTarget::WindowBorder(id)
+                    | HitTarget::WindowResize(id) => {
+                        self.active_window_id = Some(id);
+                        let _ = self
+                            .server_tx
+                            .try_send(ClientMessage::FocusWindow { window_id: id });
+
+                        if btn == MouseButton::Left {
+                            let win = self.windows.get(&id).unwrap();
+                            let rect = if win.minimized {
+                                Rect::new(win.x, win.y, win.width, 1)
+                            } else {
+                                Rect::new(win.x, win.y, win.width, win.height)
+                            };
+
+                            // Check for double click to rename
+                            let now = std::time::Instant::now();
+                            if let Some((last_id, last_time)) = self.last_click
+                                && last_id == id
+                                && now.duration_since(last_time).as_millis() < 500
+                            {
+                                self.rename_state = Some(RenameState {
+                                    window_id: id,
+                                    input: win.title.clone(),
+                                });
+                                self.last_click = None;
+                            } else {
+                                self.last_click = Some((id, now));
+
+                                // Start dragging or resizing
+                                let is_mgmt = self.mode == Mode::Desktop
+                                    || mouse.modifiers.contains(KeyModifiers::CONTROL);
+                                let is_resize = matches!(target, HitTarget::WindowResize(_))
+                                    || (is_mgmt
+                                        && mouse.column >= win.x + win.width - 2
+                                        && mouse.row >= win.y + win.height - 1);
+
+                                self.drag_state = Some(DragState {
+                                    window_id: id,
+                                    start_mouse: (mouse.column, mouse.row),
+                                    start_rect: rect,
+                                    is_resize,
+                                    last_update: now,
+                                });
+                            }
+                        }
+                    }
+                    HitTarget::CloseButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self
+                                .server_tx
+                                .try_send(ClientMessage::CloseWindow { window_id: id });
+                        }
+                    }
+                    HitTarget::MinimizeButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self
+                                .server_tx
+                                .try_send(ClientMessage::MinimizeWindow { window_id: id });
+                        }
+                    }
+                    HitTarget::MaximizeButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self
+                                .server_tx
+                                .try_send(ClientMessage::MaximizeWindow { window_id: id });
+                        }
+                    }
+                    HitTarget::FullscreenButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self
+                                .server_tx
+                                .try_send(ClientMessage::ToggleFullscreen { window_id: id });
+                        }
+                    }
+                    HitTarget::SoloButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self
+                                .server_tx
+                                .try_send(ClientMessage::ToggleSolo { window_id: id });
+                        }
+                    }
+                    HitTarget::ResetButton(id) => {
+                        if btn == MouseButton::Left {
+                            let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
+                                window_id: id,
+                                width: DEFAULT_TERM_WIDTH + 2,
+                                height: DEFAULT_TERM_HEIGHT + 2,
+                            });
+                        }
+                    }
+                    HitTarget::None => {
+                        if btn == MouseButton::Right
+                            && (self.mode == Mode::Desktop
+                                || mouse.modifiers.contains(KeyModifiers::CONTROL))
+                        {
+                            let width = DEFAULT_TERM_WIDTH + 2;
+                            let height = DEFAULT_TERM_HEIGHT + 2;
+                            let _ = self.server_tx.try_send(ClientMessage::CreateWindow {
+                                x: mouse.column,
+                                y: mouse.row,
+                                width,
+                                height,
+                                command: None,
+                                args: vec![],
+                            });
+                        }
+                        self.menu = Menu::None;
+                    }
                 }
-            } else {
-                // Local selection and paste logic
-                match mouse.kind {
-                    MouseEventKind::Down(MouseButton::Left) => {
-                        self.pending_selection = Some((id, rel_y, rel_x));
-                        self.selection = None;
-                    }
-                    MouseEventKind::Drag(MouseButton::Left) => {
-                        if let Some((pid, start_y, start_x)) = self.pending_selection {
-                            if pid == id && (start_y != rel_y || start_x != rel_x) {
+            }
+            MouseEventKind::Drag(MouseButton::Left) => {
+                if let HitTarget::WindowContent(id) = target {
+                    if let Some((pid, start_y, start_x)) = self.pending_selection {
+                        if pid == id {
+                            let win = self.windows.get(&id).unwrap();
+                            let rel_x = mouse.column.saturating_sub(win.x + 1);
+                            let rel_y = mouse.row.saturating_sub(win.y + 1);
+                            if start_y != rel_y || start_x != rel_x {
                                 self.selection = Some(Selection {
                                     window_id: id,
                                     start: (start_y, start_x),
                                     end: (rel_y, rel_x),
                                 });
                             }
-                        } else if let Some(ref mut sel) = self.selection
-                            && sel.window_id == id
-                        {
-                            sel.end = (rel_y, rel_x);
                         }
+                    } else if let Some(ref mut sel) = self.selection
+                        && sel.window_id == id
+                    {
+                        let win = self.windows.get(&id).unwrap();
+                        sel.end = (
+                            mouse.row.saturating_sub(win.y + 1),
+                            mouse.column.saturating_sub(win.x + 1),
+                        );
                     }
-                    MouseEventKind::Up(MouseButton::Left) => {
-                        if let Some(sel) = self.selection
-                            && sel.window_id == id
-                        {
-                            // If it's a zero-length selection, ignore it
-                            if sel.start == sel.end {
-                                self.selection = None;
-                                self.pending_selection = None;
-                                return Ok(false);
-                            }
-
-                            // Extract text to clipboard
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) => {
+                if let Some(sel) = self.selection {
+                    if let Some(win) = self.windows.get(&sel.window_id) {
+                        if sel.start != sel.end {
                             let mut text = String::new();
                             let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
                             let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
-
                             let inner_w = win.width.saturating_sub(2) as usize;
                             for r in r1..=r2 {
                                 let mut line = String::new();
                                 for c in 0..inner_w {
                                     let col = c as u16;
-                                    if r == r1 && col < c1 {
+                                    if (r == r1 && col < c1) || (r == r2 && col > c2) {
                                         continue;
                                     }
-                                    if r == r2 && col > c2 {
-                                        continue;
-                                    }
-
                                     let idx = r as usize * inner_w + c;
                                     if let Some(cell) = win.screen.get(idx) {
                                         line.push(cell.ch);
@@ -958,195 +1162,74 @@ impl Client {
                             }
                             self.clipboard = text;
                         }
-                        self.selection = None;
-                        self.pending_selection = None;
-                    }
-                    MouseEventKind::Down(MouseButton::Right) => {
-                        if !self.clipboard.is_empty() {
-                            let data = self.clipboard.clone().into_bytes();
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
-                            self.clipboard.clear();
-                            self.selection = None;
-                        }
-                    }
-                    _ => {}
-                }
-            }
-            return Ok(false); // ALWAYS return here when over a terminal area. No desktop logic allowed.
-        }
-
-        // --- 3. Standard Window Management / Desktop Logic ---
-        // Only reached if NOT dragging AND NOT hovering over a terminal area.
-        match mouse.kind {
-            MouseEventKind::Down(MouseButton::Right)
-                if self.mode == Mode::Desktop
-                    || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
-                // Calculate window size based on screen size
-                let width = DEFAULT_TERM_WIDTH + 2;
-                let height = DEFAULT_TERM_HEIGHT + 2;
-                let _ = self.server_tx.try_send(ClientMessage::CreateWindow {
-                    x: mouse.column,
-                    y: mouse.row,
-                    width,
-                    height,
-                    command: None,
-                    args: vec![],
-                });
-                Ok(false)
-            }
-            MouseEventKind::Down(MouseButton::Left) => {
-                // Find window at this position (check front windows first)
-                let mut windows_with_z: Vec<_> = self.windows.iter().collect();
-                windows_with_z.sort_by(|a, b| b.1.z_order.cmp(&a.1.z_order)); // Highest z_order first
-                for (&id, _win) in windows_with_z {
-                    let win = match self.windows.get(&id) {
-                        Some(w) => w,
-                        None => continue,
-                    };
-                    let rect = if win.minimized {
-                        Rect::new(win.x, win.y, win.width, 1)
-                    } else {
-                        Rect::new(win.x, win.y, win.width, win.height)
-                    };
-
-                    if mouse.column >= rect.x
-                        && mouse.column < rect.x + rect.width
-                        && mouse.row >= rect.y
-                        && mouse.row < rect.y + rect.height
-                    {
-                        let is_title = mouse.row == rect.y;
-                        let is_bottom = mouse.row == rect.y + rect.height - 1;
-                        let is_resize = !win.minimized
-                            && mouse.column == rect.x + rect.width - 1
-                            && mouse.row == rect.y + rect.height - 1;
-
-                        if is_bottom && !is_resize {
-                            // Check for click on [D] reset button (last 5 chars of bottom border)
-                            if mouse.column >= rect.x + rect.width.saturating_sub(5)
-                                && mouse.column < rect.x + rect.width - 1
-                            {
-                                let _ = self.server_tx.try_send(ClientMessage::ResizeWindow {
-                                    window_id: id,
-                                    width: DEFAULT_TERM_WIDTH + 2,
-                                    height: DEFAULT_TERM_HEIGHT + 2,
-                                });
-                                return Ok(false);
-                            }
-                        }
-
-                        if is_title {
-                            // Check for double click to rename
-                            let now = std::time::Instant::now();
-                            if let Some((last_id, last_time)) = self.last_click
-                                && last_id == id
-                                && now.duration_since(last_time).as_millis() < 500
-                            {
-                                // Verify we're not clicking the buttons
-                                let is_button = (mouse.column >= rect.x + 2
-                                    && mouse.column <= rect.x + 12)
-                                    || (mouse.column >= rect.x + rect.width.saturating_sub(5));
-                                if !is_button {
-                                    self.rename_state = Some(RenameState {
-                                        window_id: id,
-                                        input: win.title.clone(),
-                                    });
-                                    self.last_click = None;
-                                    return Ok(false);
-                                }
-                            }
-                            self.last_click = Some((id, now));
-
-                            if mouse.column >= rect.x + 2 && mouse.column <= rect.x + 4 {
-                                let _ = self
-                                    .server_tx
-                                    .try_send(ClientMessage::CloseWindow { window_id: id });
-                                return Ok(false);
-                            }
-                            if mouse.column >= rect.x + 6 && mouse.column <= rect.x + 8 {
-                                let _ = self
-                                    .server_tx
-                                    .try_send(ClientMessage::MinimizeWindow { window_id: id });
-                                return Ok(false);
-                            }
-                            if mouse.column >= rect.x + 10 && mouse.column <= rect.x + 12 {
-                                let _ = self
-                                    .server_tx
-                                    .try_send(ClientMessage::MaximizeWindow { window_id: id });
-                                return Ok(false);
-                            }
-
-                            // Fullscreen [F] button
-                            if mouse.column >= rect.x + rect.width.saturating_sub(9)
-                                && mouse.column <= rect.x + rect.width.saturating_sub(6)
-                            {
-                                let _ = self
-                                    .server_tx
-                                    .try_send(ClientMessage::ToggleFullscreen { window_id: id });
-                                return Ok(false);
-                            }
-
-                            // Solo [S] button
-                            if mouse.column >= rect.x + rect.width.saturating_sub(5)
-                                && mouse.column < rect.x + rect.width
-                            {
-                                let _ = self
-                                    .server_tx
-                                    .try_send(ClientMessage::ToggleSolo { window_id: id });
-                                return Ok(false);
-                            }
-                        }
-
-                        // Focus this window
-                        self.active_window_id = Some(id);
-                        let _ = self
-                            .server_tx
-                            .try_send(ClientMessage::FocusWindow { window_id: id });
-
-                        let is_mgmt = self.mode == Mode::Desktop
-                            || mouse.modifiers.contains(KeyModifiers::CONTROL);
-
-                        if is_title || is_resize || is_mgmt {
-                            self.drag_state = Some(DragState {
-                                window_id: id,
-                                start_mouse: (mouse.column, mouse.row),
-                                start_rect: rect,
-                                is_resize: is_resize
-                                    || (!win.minimized
-                                        && is_mgmt
-                                        && mouse.column >= rect.x + rect.width - 2
-                                        && mouse.row >= rect.y + rect.height - 1),
-                                last_update: std::time::Instant::now(),
-                            });
-                        }
-                        return Ok(false);
                     }
                 }
-                Ok(false)
+                self.selection = None;
+                self.pending_selection = None;
+
+                if let HitTarget::WindowContent(id) = target {
+                    let win = self.windows.get(&id).unwrap();
+                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let data = format!(
+                            "\x1b[<0;{};{}m",
+                            mouse.column.saturating_sub(win.x + 1) + 1,
+                            mouse.row.saturating_sub(win.y + 1) + 1
+                        )
+                        .into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    }
+                }
             }
             MouseEventKind::ScrollUp => {
-                if let Some(id) = self.active_window_id {
-                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                        window_id: id,
-                        amount: 3,
-                    });
+                if let HitTarget::WindowContent(id) = target {
+                    let win = self.windows.get(&id).unwrap();
+                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let data = format!(
+                            "\x1b[<64;{};{}M",
+                            mouse.column.saturating_sub(win.x + 1) + 1,
+                            mouse.row.saturating_sub(win.y + 1) + 1
+                        )
+                        .into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    } else {
+                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                            window_id: id,
+                            amount: 3,
+                        });
+                    }
                 }
-                Ok(false)
             }
             MouseEventKind::ScrollDown => {
-                if let Some(id) = self.active_window_id {
-                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                        window_id: id,
-                        amount: -3,
-                    });
+                if let HitTarget::WindowContent(id) = target {
+                    let win = self.windows.get(&id).unwrap();
+                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let data = format!(
+                            "\x1b[<65;{};{}M",
+                            mouse.column.saturating_sub(win.x + 1) + 1,
+                            mouse.row.saturating_sub(win.y + 1) + 1
+                        )
+                        .into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    } else {
+                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                            window_id: id,
+                            amount: -3,
+                        });
+                    }
                 }
-                Ok(false)
             }
-            _ => Ok(false),
+            _ => {}
         }
+        Ok(false)
     }
 }
 
@@ -1236,6 +1319,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
 
     // Send connect message
     let initial_size = terminal.size()?;
+    // Full width now that Deskbar is an overlay
     let _ = server_tx
         .send(ClientMessage::Connect {
             term_size: (initial_size.width, initial_size.height),
@@ -1256,12 +1340,11 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
 
     loop {
         if needs_redraw {
+            client.update_hit_map();
             terminal.draw(|f| {
-                // ... rendering logic
                 let size = f.area();
-                // ... (rest of the drawing logic)
 
-                // Background
+                // Background (Full screen)
                 f.render_widget(
                     Block::default()
                         .borders(Borders::ALL)
@@ -1279,12 +1362,19 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                     } else {
                         Rect::new(win.x, win.y, win.width, win.height)
                     };
+
+                    // Windows use full screen area
+                    let window_area = render_rect.intersection(size);
+                    if window_area.is_empty() {
+                        continue;
+                    }
+
                     // Shadow
                     let shadow_area = Rect::new(
-                        render_rect.x + 1,
-                        render_rect.y + 1,
-                        render_rect.width,
-                        render_rect.height,
+                        window_area.x + 1,
+                        window_area.y + 1,
+                        window_area.width,
+                        window_area.height,
                     )
                     .intersection(size);
                     if !shadow_area.is_empty() && win.focused {
@@ -1292,12 +1382,6 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             Block::default().style(Style::default().bg(Color::Rgb(30, 30, 30))),
                             shadow_area,
                         );
-                    }
-
-                    // Window area
-                    let window_area = render_rect.intersection(size);
-                    if window_area.is_empty() {
-                        continue;
                     }
 
                     // Clear window area
@@ -1363,7 +1447,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                             win.width.saturating_sub(2),
                             win.height.saturating_sub(2),
                         )
-                        .intersection(size);
+                        .intersection(window_area);
 
                         if !inner_area.is_empty() {
                             let mut widget = TerminalWidget::new(win);
@@ -1378,7 +1462,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                         // Resize handle
                         let handle_x = win.x + win.width - 1;
                         let handle_y = win.y + win.height - 1;
-                        if handle_x < size.width && handle_y < size.height {
+                        if window_area.contains((handle_x, handle_y).into()) {
                             let style = if win.focused {
                                 Style::default().fg(Color::Cyan)
                             } else {
@@ -1391,7 +1475,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                     }
                 }
 
-                // --- MENU BAR (Always on Top) ---
+                // --- MENU BAR ---
                 let menu_rect = Rect::new(0, 0, size.width, 1);
                 let menu_style = if client.mode == Mode::Desktop {
                     Style::default()
@@ -1480,12 +1564,55 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
 
                 if client.mode == Mode::Terminal {
                     let hint = " [F12] Desktop Mode ";
+                    let hint_x = size
+                        .width
+                        .saturating_sub(hint.len() as u16 + DESKBAR_WIDTH + 2);
                     f.render_widget(
                         Paragraph::new(hint).style(Style::default().fg(Color::DarkGray)),
+                        Rect::new(hint_x, 0, hint.len() as u16, 1),
+                    );
+                }
+
+                // --- DESKBAR (Overlay, Dynamic Height) ---
+                let deskbar_height = (client.windows.len() as u16 + 2).max(3);
+                let deskbar_area = Rect::new(
+                    size.width.saturating_sub(DESKBAR_WIDTH),
+                    0,
+                    DESKBAR_WIDTH,
+                    deskbar_height,
+                );
+
+                f.render_widget(Clear, deskbar_area);
+                f.render_widget(
+                    Block::default()
+                        .borders(Borders::ALL)
+                        .border_style(Style::default().fg(Color::Rgb(50, 50, 100)))
+                        .title(" TP ")
+                        .style(Style::default().bg(Color::Rgb(15, 15, 30))),
+                    deskbar_area,
+                );
+
+                let mut windows_sorted: Vec<_> = client.windows.values().collect();
+                windows_sorted.sort_by_key(|w| w.id);
+                for (i, win) in windows_sorted.iter().enumerate() {
+                    let style = if win.focused {
+                        Style::default()
+                            .bg(Color::Cyan)
+                            .fg(Color::Black)
+                            .add_modifier(Modifier::BOLD)
+                    } else if !win.running {
+                        Style::default().fg(Color::Red)
+                    } else {
+                        Style::default().fg(Color::White)
+                    };
+                    let prefix = if win.focused { "> " } else { "  " };
+                    let text = format!("{}{}", prefix, win.title);
+                    f.render_widget(
+                        Paragraph::new(text).style(style),
                         Rect::new(
-                            size.width.saturating_sub(hint.len() as u16 + 2),
-                            0,
-                            hint.len() as u16,
+                            deskbar_area.x + 1,
+                            1 + i as u16,
+                            DESKBAR_WIDTH.saturating_sub(2),
                             1,
                         ),
                     );
