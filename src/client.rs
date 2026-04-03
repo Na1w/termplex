@@ -134,8 +134,8 @@ impl Client {
             (Menu::File, 0) => {
                 // New Terminal
                 let screen = self.last_screen_size;
-                let width = (screen.width.saturating_sub(4)).clamp(20, 80);
-                let height = (screen.height.saturating_sub(6)).clamp(5, 24);
+                let width = DEFAULT_TERM_WIDTH + 2;
+                let height = DEFAULT_TERM_HEIGHT + 2;
                 let x = (screen.width.saturating_sub(width)) / 2;
                 let y = (screen.height.saturating_sub(height)) / 2;
                 let _ = self.server_tx.try_send(ClientMessage::CreateWindow {
@@ -434,8 +434,8 @@ impl Client {
             (KeyModifiers::NONE, KeyCode::Char('n')) => {
                 // Calculate window size based on screen size
                 let screen = self.last_screen_size;
-                let width = (screen.width.saturating_sub(4)).clamp(20, 80);
-                let height = (screen.height.saturating_sub(6)).clamp(5, 24);
+                let width = DEFAULT_TERM_WIDTH + 2;
+                let height = DEFAULT_TERM_HEIGHT + 2;
                 let x = (screen.width.saturating_sub(width)) / 2;
                 let y = (screen.height.saturating_sub(height)) / 2;
                 let msg = ClientMessage::CreateWindow {
@@ -986,9 +986,8 @@ impl Client {
                     || mouse.modifiers.contains(KeyModifiers::CONTROL) =>
             {
                 // Calculate window size based on screen size
-                let screen = self.last_screen_size;
-                let width = (screen.width.saturating_sub(4)).clamp(20, 80);
-                let height = (screen.height.saturating_sub(6)).clamp(5, 24);
+                let width = DEFAULT_TERM_WIDTH + 2;
+                let height = DEFAULT_TERM_HEIGHT + 2;
                 let _ = self.server_tx.try_send(ClientMessage::CreateWindow {
                     x: mouse.column,
                     y: mouse.row,
