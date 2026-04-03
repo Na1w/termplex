@@ -75,6 +75,7 @@ struct Client {
     selected_item: usize,
     clipboard: String,
     selection: Option<Selection>,
+    pending_selection: Option<(usize, u16, u16)>,
     drag_state: Option<DragState>,
     rename_state: Option<RenameState>,
     last_screen_size: Rect,
@@ -93,6 +94,7 @@ impl Client {
             selected_item: 0,
             clipboard: String::new(),
             selection: None,
+            pending_selection: None,
             drag_state: None,
             rename_state: None,
             last_screen_size: screen_size,
@@ -896,14 +898,19 @@ impl Client {
                 // Local selection and paste logic
                 match mouse.kind {
                     MouseEventKind::Down(MouseButton::Left) => {
-                        self.selection = Some(Selection {
-                            window_id: id,
-                            start: (rel_y, rel_x),
-                            end: (rel_y, rel_x),
-                        });
+                        self.pending_selection = Some((id, rel_y, rel_x));
+                        self.selection = None;
                     }
                     MouseEventKind::Drag(MouseButton::Left) => {
-                        if let Some(ref mut sel) = self.selection
+                        if let Some((pid, start_y, start_x)) = self.pending_selection {
+                            if pid == id && (start_y != rel_y || start_x != rel_x) {
+                                self.selection = Some(Selection {
+                                    window_id: id,
+                                    start: (start_y, start_x),
+                                    end: (rel_y, rel_x),
+                                });
+                            }
+                        } else if let Some(ref mut sel) = self.selection
                             && sel.window_id == id
                         {
                             sel.end = (rel_y, rel_x);
@@ -913,6 +920,13 @@ impl Client {
                         if let Some(sel) = self.selection
                             && sel.window_id == id
                         {
+                            // If it's a zero-length selection, ignore it
+                            if sel.start == sel.end {
+                                self.selection = None;
+                                self.pending_selection = None;
+                                return Ok(false);
+                            }
+
                             // Extract text to clipboard
                             let mut text = String::new();
                             let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
@@ -942,6 +956,8 @@ impl Client {
                             }
                             self.clipboard = text;
                         }
+                        self.selection = None;
+                        self.pending_selection = None;
                     }
                     MouseEventKind::Down(MouseButton::Right) => {
                         if !self.clipboard.is_empty() {

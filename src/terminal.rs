@@ -208,4 +208,19 @@ impl Terminal {
 
         None
     }
+
+    pub fn shutdown(&self) {
+        if self.running.load(Ordering::SeqCst) && self.child_pid != 0 {
+            #[cfg(unix)]
+            unsafe {
+                libc::kill(self.child_pid as libc::pid_t, libc::SIGHUP);
+            }
+        }
+    }
+}
+
+impl Drop for Terminal {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
 }

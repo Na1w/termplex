@@ -1456,6 +1456,7 @@ dependencies = [
  "bincode",
  "clap",
  "crossterm",
+ "libc",
  "portable-pty",
  "ratatui",
  "serde",
