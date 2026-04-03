@@ -896,7 +896,7 @@ impl Client {
                 return Ok(false);
             }
 
-            if let MouseEventKind::Drag(MouseButton::Left) = mouse.kind {
+            if matches!(mouse.kind, MouseEventKind::Drag(_)) {
                 if !self.windows.contains_key(&state.window_id) {
                     self.drag_state = None;
                     return Ok(false);
@@ -969,23 +969,25 @@ impl Client {
                             .server_tx
                             .try_send(ClientMessage::FocusWindow { window_id: id });
 
-                        if btn == MouseButton::Left {
-                            let win = self.windows.get(&id).unwrap();
-                            let rel_x = mouse.column.saturating_sub(win.x + 1);
-                            let rel_y = mouse.row.saturating_sub(win.y + 1);
+                        let win = self.windows.get(&id).unwrap();
+                        let rel_x = mouse.column.saturating_sub(win.x + 1);
+                        let rel_y = mouse.row.saturating_sub(win.y + 1);
 
-                            if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT)
-                            {
-                                let data =
-                                    format!("\x1b[<0;{};{}M", rel_x + 1, rel_y + 1).into_bytes();
-                                let _ = self.server_tx.try_send(ClientMessage::Input {
-                                    window_id: id,
-                                    data,
-                                });
-                            } else {
-                                self.pending_selection = Some((id, rel_y, rel_x));
-                                self.selection = None;
-                            }
+                        if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                            let sgr_btn = match btn {
+                                MouseButton::Left => 0,
+                                MouseButton::Middle => 1,
+                                MouseButton::Right => 2,
+                            };
+                            let data = format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
+                                .into_bytes();
+                            let _ = self.server_tx.try_send(ClientMessage::Input {
+                                window_id: id,
+                                data,
+                            });
+                        } else if btn == MouseButton::Left {
+                            self.pending_selection = Some((id, rel_y, rel_x));
+                            self.selection = None;
                         } else if btn == MouseButton::Right && !self.clipboard.is_empty() {
                             let data = self.clipboard.clone().into_bytes();
                             let _ = self.server_tx.try_send(ClientMessage::Input {
@@ -1107,68 +1109,91 @@ impl Client {
                     }
                 }
             }
-            MouseEventKind::Drag(MouseButton::Left) => {
+            MouseEventKind::Drag(btn) => {
                 if let HitTarget::WindowContent(id) = target {
-                    if let Some((pid, start_y, start_x)) = self.pending_selection {
-                        if pid == id {
-                            let win = self.windows.get(&id).unwrap();
-                            let rel_x = mouse.column.saturating_sub(win.x + 1);
-                            let rel_y = mouse.row.saturating_sub(win.y + 1);
-                            if start_y != rel_y || start_x != rel_x {
-                                self.selection = Some(Selection {
-                                    window_id: id,
-                                    start: (start_y, start_x),
-                                    end: (rel_y, rel_x),
-                                });
+                    let win = self.windows.get(&id).unwrap();
+                    if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let rel_x = mouse.column.saturating_sub(win.x + 1);
+                        let rel_y = mouse.row.saturating_sub(win.y + 1);
+                        let sgr_btn = match btn {
+                            MouseButton::Left => 32,
+                            MouseButton::Middle => 33,
+                            MouseButton::Right => 34,
+                        };
+                        let data =
+                            format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1).into_bytes();
+                        let _ = self.server_tx.try_send(ClientMessage::Input {
+                            window_id: id,
+                            data,
+                        });
+                    } else if btn == MouseButton::Left {
+                        if let Some((pid, start_y, start_x)) = self.pending_selection {
+                            if pid == id {
+                                let rel_x = mouse.column.saturating_sub(win.x + 1);
+                                let rel_y = mouse.row.saturating_sub(win.y + 1);
+                                if start_y != rel_y || start_x != rel_x {
+                                    self.selection = Some(Selection {
+                                        window_id: id,
+                                        start: (start_y, start_x),
+                                        end: (rel_y, rel_x),
+                                    });
+                                }
                             }
+                        } else if let Some(ref mut sel) = self.selection
+                            && sel.window_id == id
+                        {
+                            sel.end = (
+                                mouse.row.saturating_sub(win.y + 1),
+                                mouse.column.saturating_sub(win.x + 1),
+                            );
                         }
-                    } else if let Some(ref mut sel) = self.selection
-                        && sel.window_id == id
-                    {
-                        let win = self.windows.get(&id).unwrap();
-                        sel.end = (
-                            mouse.row.saturating_sub(win.y + 1),
-                            mouse.column.saturating_sub(win.x + 1),
-                        );
                     }
                 }
             }
-            MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(sel) = self.selection
-                    && let Some(win) = self.windows.get(&sel.window_id)
-                    && sel.start != sel.end
-                {
-                    let mut text = String::new();
-                    let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
-                    let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
-                    let inner_w = win.width.saturating_sub(2) as usize;
-                    for r in r1..=r2 {
-                        let mut line = String::new();
-                        for c in 0..inner_w {
-                            let col = c as u16;
-                            if (r == r1 && col < c1) || (r == r2 && col > c2) {
-                                continue;
+            MouseEventKind::Up(btn) => {
+                if btn == MouseButton::Left {
+                    if let Some(sel) = self.selection
+                        && let Some(win) = self.windows.get(&sel.window_id)
+                        && sel.start != sel.end
+                    {
+                        let mut text = String::new();
+                        let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
+                        let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
+                        let inner_w = win.width.saturating_sub(2) as usize;
+                        for r in r1..=r2 {
+                            let mut line = String::new();
+                            for c in 0..inner_w {
+                                let col = c as u16;
+                                if (r == r1 && col < c1) || (r == r2 && col > c2) {
+                                    continue;
+                                }
+                                let idx = r as usize * inner_w + c;
+                                if let Some(cell) = win.screen.get(idx) {
+                                    line.push(cell.ch);
+                                }
                             }
-                            let idx = r as usize * inner_w + c;
-                            if let Some(cell) = win.screen.get(idx) {
-                                line.push(cell.ch);
+                            text.push_str(line.trim_end());
+                            if r < r2 {
+                                text.push('\n');
                             }
                         }
-                        text.push_str(line.trim_end());
-                        if r < r2 {
-                            text.push('\n');
-                        }
+                        self.clipboard = text;
                     }
-                    self.clipboard = text;
+                    self.selection = None;
+                    self.pending_selection = None;
                 }
-                self.selection = None;
-                self.pending_selection = None;
 
                 if let HitTarget::WindowContent(id) = target {
                     let win = self.windows.get(&id).unwrap();
                     if win.mouse_reporting && !mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        let sgr_btn = match btn {
+                            MouseButton::Left => 0,
+                            MouseButton::Middle => 1,
+                            MouseButton::Right => 2,
+                        };
                         let data = format!(
-                            "\x1b[<0;{};{}m",
+                            "\x1b[<{};{};{}m",
+                            sgr_btn,
                             mouse.column.saturating_sub(win.x + 1) + 1,
                             mouse.row.saturating_sub(win.y + 1) + 1
                         )
