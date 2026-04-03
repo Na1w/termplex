@@ -10,11 +10,20 @@ use crate::protocol::{Cell, WindowState};
 /// Widget that renders a terminal window from server data
 pub struct TerminalWidget<'a> {
     pub state: &'a WindowState,
+    pub selection: Option<((u16, u16), (u16, u16))>,
 }
 
 impl<'a> TerminalWidget<'a> {
     pub fn new(state: &'a WindowState) -> Self {
-        Self { state }
+        Self {
+            state,
+            selection: None,
+        }
+    }
+
+    pub fn with_selection(mut self, selection: Option<((u16, u16), (u16, u16))>) -> Self {
+        self.selection = selection;
+        self
     }
 }
 
@@ -37,23 +46,47 @@ impl<'a> Widget for TerminalWidget<'a> {
                 let idx = (row + row_offset) * full_width + (col + col_offset);
                 let cell = win.screen.get(idx).copied().unwrap_or(Cell::default());
 
-                let style = Style::default()
+                let mut style = Style::default()
                     .fg(Color::Rgb(cell.fg.0, cell.fg.1, cell.fg.2))
                     .bg(Color::Rgb(cell.bg.0, cell.bg.1, cell.bg.2));
 
-                let style = if cell.bold() {
+                // Apply selection highlighting
+                if let Some((start, end)) = self.selection {
+                    let r = row as u16 + row_offset as u16;
+                    let c = col as u16 + col_offset as u16;
+                    let (r1, c1) = (start.0.min(end.0), start.1.min(end.1));
+                    let (r2, c2) = (start.0.max(end.0), start.1.max(end.1));
+
+                    let is_selected = if r > r1 && r < r2 {
+                        true
+                    } else if r == r1 && r == r2 {
+                        c >= c1 && c <= c2
+                    } else if r == r1 {
+                        c >= c1
+                    } else if r == r2 {
+                        c <= c2
+                    } else {
+                        false
+                    };
+
+                    if is_selected {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
+                }
+
+                style = if cell.bold() {
                     style.add_modifier(Modifier::BOLD)
                 } else {
                     style
                 };
 
-                let style = if cell.italic() {
+                style = if cell.italic() {
                     style.add_modifier(Modifier::ITALIC)
                 } else {
                     style
                 };
 
-                let style = if cell.underline() {
+                style = if cell.underline() {
                     style.add_modifier(Modifier::UNDERLINED)
                 } else {
                     style

@@ -60,12 +60,21 @@ struct RenameState {
     input: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    window_id: usize,
+    start: (u16, u16),
+    end: (u16, u16),
+}
+
 struct Client {
     windows: HashMap<usize, WindowState>,
     active_window_id: Option<usize>,
     mode: Mode,
     menu: Menu,
     selected_item: usize,
+    clipboard: String,
+    selection: Option<Selection>,
     drag_state: Option<DragState>,
     rename_state: Option<RenameState>,
     last_screen_size: Rect,
@@ -82,6 +91,8 @@ impl Client {
             mode: Mode::Terminal,
             menu: Menu::None,
             selected_item: 0,
+            clipboard: String::new(),
+            selection: None,
             drag_state: None,
             rename_state: None,
             last_screen_size: screen_size,
@@ -825,11 +836,13 @@ impl Client {
             }
 
             let win = self.windows.get(&id).unwrap();
+            let rel_x = mouse.column.saturating_sub(win.x + 1);
+            let rel_y = mouse.row.saturating_sub(win.y + 1);
 
             // Only send mouse sequences to the server if the application requested them
             if win.mouse_reporting {
-                let rel_x = mouse.column.saturating_sub(win.x + 1) + 1;
-                let rel_y = mouse.row.saturating_sub(win.y + 1) + 1;
+                let s_rel_x = rel_x + 1;
+                let s_rel_y = rel_y + 1;
 
                 match mouse.kind {
                     MouseEventKind::Down(btn)
@@ -851,25 +864,89 @@ impl Client {
                             'M'
                         };
                         let data =
-                            format!("\x1b[<{};{};{}{}", cb, rel_x, rel_y, suffix).into_bytes();
+                            format!("\x1b[<{};{};{}{}", cb, s_rel_x, s_rel_y, suffix).into_bytes();
                         let _ = self.server_tx.try_send(ClientMessage::Input {
                             window_id: id,
                             data,
                         });
                     }
                     MouseEventKind::ScrollUp => {
-                        let data = format!("\x1b[<64;{};{}M", rel_x, rel_y).into_bytes();
+                        let data = format!("\x1b[<64;{};{}M", s_rel_x, s_rel_y).into_bytes();
                         let _ = self.server_tx.try_send(ClientMessage::Input {
                             window_id: id,
                             data,
                         });
                     }
                     MouseEventKind::ScrollDown => {
-                        let data = format!("\x1b[<65;{};{}M", rel_x, rel_y).into_bytes();
+                        let data = format!("\x1b[<65;{};{}M", s_rel_x, s_rel_y).into_bytes();
                         let _ = self.server_tx.try_send(ClientMessage::Input {
                             window_id: id,
                             data,
                         });
+                    }
+                    _ => {}
+                }
+            } else {
+                // Local selection and paste logic
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        self.selection = Some(Selection {
+                            window_id: id,
+                            start: (rel_y, rel_x),
+                            end: (rel_y, rel_x),
+                        });
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some(ref mut sel) = self.selection
+                            && sel.window_id == id
+                        {
+                            sel.end = (rel_y, rel_x);
+                        }
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        if let Some(sel) = self.selection
+                            && sel.window_id == id
+                        {
+                            // Extract text to clipboard
+                            let mut text = String::new();
+                            let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
+                            let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
+
+                            let inner_w = win.width.saturating_sub(2) as usize;
+                            for r in r1..=r2 {
+                                let mut line = String::new();
+                                for c in 0..inner_w {
+                                    let col = c as u16;
+                                    if r == r1 && col < c1 {
+                                        continue;
+                                    }
+                                    if r == r2 && col > c2 {
+                                        continue;
+                                    }
+
+                                    let idx = r as usize * inner_w + c;
+                                    if let Some(cell) = win.screen.get(idx) {
+                                        line.push(cell.ch);
+                                    }
+                                }
+                                text.push_str(line.trim_end());
+                                if r < r2 {
+                                    text.push('\n');
+                                }
+                            }
+                            self.clipboard = text;
+                        }
+                    }
+                    MouseEventKind::Down(MouseButton::Right) => {
+                        if !self.clipboard.is_empty() {
+                            let data = self.clipboard.clone().into_bytes();
+                            let _ = self.server_tx.try_send(ClientMessage::Input {
+                                window_id: id,
+                                data,
+                            });
+                            self.clipboard.clear();
+                            self.selection = None;
+                        }
                     }
                     _ => {}
                 }
@@ -1243,7 +1320,13 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                         .intersection(size);
 
                         if !inner_area.is_empty() {
-                            f.render_widget(TerminalWidget::new(win), inner_area);
+                            let mut widget = TerminalWidget::new(win);
+                            if let Some(sel) = client.selection
+                                && sel.window_id == win.id
+                            {
+                                widget = widget.with_selection(Some((sel.start, sel.end)));
+                            }
+                            f.render_widget(widget, inner_area);
                         }
 
                         // Resize handle
