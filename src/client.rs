@@ -986,15 +986,13 @@ impl Client {
                                 self.pending_selection = Some((id, rel_y, rel_x));
                                 self.selection = None;
                             }
-                        } else if btn == MouseButton::Right {
-                            if !self.clipboard.is_empty() {
-                                let data = self.clipboard.clone().into_bytes();
-                                let _ = self.server_tx.try_send(ClientMessage::Input {
-                                    window_id: id,
-                                    data,
-                                });
-                                self.clipboard.clear();
-                            }
+                        } else if btn == MouseButton::Right && !self.clipboard.is_empty() {
+                            let data = self.clipboard.clone().into_bytes();
+                            let _ = self.server_tx.try_send(ClientMessage::Input {
+                                window_id: id,
+                                data,
+                            });
+                            self.clipboard.clear();
                         }
                     }
                     HitTarget::WindowTitle(id)
@@ -1136,33 +1134,32 @@ impl Client {
                 }
             }
             MouseEventKind::Up(MouseButton::Left) => {
-                if let Some(sel) = self.selection {
-                    if let Some(win) = self.windows.get(&sel.window_id) {
-                        if sel.start != sel.end {
-                            let mut text = String::new();
-                            let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
-                            let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
-                            let inner_w = win.width.saturating_sub(2) as usize;
-                            for r in r1..=r2 {
-                                let mut line = String::new();
-                                for c in 0..inner_w {
-                                    let col = c as u16;
-                                    if (r == r1 && col < c1) || (r == r2 && col > c2) {
-                                        continue;
-                                    }
-                                    let idx = r as usize * inner_w + c;
-                                    if let Some(cell) = win.screen.get(idx) {
-                                        line.push(cell.ch);
-                                    }
-                                }
-                                text.push_str(line.trim_end());
-                                if r < r2 {
-                                    text.push('\n');
-                                }
+                if let Some(sel) = self.selection
+                    && let Some(win) = self.windows.get(&sel.window_id)
+                    && sel.start != sel.end
+                {
+                    let mut text = String::new();
+                    let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
+                    let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
+                    let inner_w = win.width.saturating_sub(2) as usize;
+                    for r in r1..=r2 {
+                        let mut line = String::new();
+                        for c in 0..inner_w {
+                            let col = c as u16;
+                            if (r == r1 && col < c1) || (r == r2 && col > c2) {
+                                continue;
                             }
-                            self.clipboard = text;
+                            let idx = r as usize * inner_w + c;
+                            if let Some(cell) = win.screen.get(idx) {
+                                line.push(cell.ch);
+                            }
+                        }
+                        text.push_str(line.trim_end());
+                        if r < r2 {
+                            text.push('\n');
                         }
                     }
+                    self.clipboard = text;
                 }
                 self.selection = None;
                 self.pending_selection = None;
