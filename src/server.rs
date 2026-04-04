@@ -173,7 +173,9 @@ impl ServerState {
         let inner_width = win.rect.width.saturating_sub(3) as usize;
 
         let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
-        let scrollback_size = total_lines.saturating_sub(inner_height).min(SCROLLBACK_SIZE);
+        let scrollback_size = total_lines
+            .saturating_sub(inner_height)
+            .min(SCROLLBACK_SIZE);
 
         let total_cells = inner_width * inner_height;
 
@@ -309,7 +311,9 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
     let inner_width = win.rect.width.saturating_sub(3) as usize;
 
     let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
-    let scrollback_size = total_lines.saturating_sub(inner_height).min(SCROLLBACK_SIZE);
+    let scrollback_size = total_lines
+        .saturating_sub(inner_height)
+        .min(SCROLLBACK_SIZE);
 
     let total_cells = inner_width * inner_height;
 
@@ -1385,7 +1389,8 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     scrollback_size: new_ws.scrollback_size,
                                     scroll_offset: new_ws.scroll_offset,
                                 })
-                            } else {                                None
+                            } else {
+                                None
                             }
                         }
                     } else {

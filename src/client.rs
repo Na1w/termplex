@@ -28,7 +28,7 @@ use tokio::time::interval;
 use crate::protocol::*;
 use crate::widgets::TerminalWidget;
 
-const DESKBAR_WIDTH: u16 = 11;
+const DESKBAR_WIDTH: u16 = 16;
 
 #[derive(Debug)]
 enum AppEvent {
@@ -148,22 +148,6 @@ impl Client {
             return self.hit_map.get(idx).copied().unwrap_or(HitTarget::None);
         }
         HitTarget::None
-    }
-
-    fn get_window_at(&self, x: u16, y: u16) -> Option<(usize, bool)> {
-        match self.get_hit(x, y) {
-            HitTarget::WindowContent(id) => Some((id, true)),
-            HitTarget::WindowTitle(id)
-            | HitTarget::WindowBorder(id)
-            | HitTarget::WindowResize(id)
-            | HitTarget::CloseButton(id)
-            | HitTarget::MinimizeButton(id)
-            | HitTarget::MaximizeButton(id)
-            | HitTarget::FullscreenButton(id)
-            | HitTarget::SoloButton(id)
-            | HitTarget::ResetButton(id) => Some((id, false)),
-            _ => None,
-        }
     }
 
     fn update_hit_map(&mut self) {
@@ -292,7 +276,11 @@ impl Client {
                     };
                     for dy in 0..items_count {
                         for dx in 0..dw {
-                            self.set_hit(x_offset + 1 + dx, 2 + dy as u16, HitTarget::MenuItem(m, dy));
+                            self.set_hit(
+                                x_offset + 1 + dx,
+                                2 + dy as u16,
+                                HitTarget::MenuItem(m, dy),
+                            );
                         }
                     }
                 }
@@ -474,15 +462,7 @@ impl Client {
                         return Ok(false);
                     }
 
-                    // Hover-based redirection:
-                    // If mouse is inside ANY window's terminal area (excluding borders),
-                    // send ALL keys directly to that window unconditionally.
-                    let (mx, my) = self.last_mouse_pos;
-                    if let Some((id, true)) = self.get_window_at(mx, my) {
-                        return self.send_key_to_window(id, key);
-                    }
-
-                    // Default to active window if not hovering over anything specific
+                    // Send keys directly to the active window
                     if let Some(id) = self.active_window_id {
                         return self.send_key_to_window(id, key);
                     }
@@ -797,7 +777,8 @@ impl Client {
                                 if available_track > 0 {
                                     let rel_y = mouse.row.saturating_sub(win.y + 1);
                                     let rel_y_clamped = rel_y.min(available_track);
-                                    let ratio = 1.0 - (rel_y_clamped as f32 / available_track as f32);
+                                    let ratio =
+                                        1.0 - (rel_y_clamped as f32 / available_track as f32);
                                     let offset = (ratio * scrollback as f32).round() as usize;
 
                                     if let Some(win_mut) = self.windows.get_mut(&id) {
@@ -924,35 +905,34 @@ impl Client {
             }
             MouseEventKind::Drag(btn) => {
                 if let Some(id) = self.scrollbar_drag {
-                    if btn == MouseButton::Left {
-                        if let Some(win) = self.windows.get(&id) {
-                            let inner_h = win.height.saturating_sub(2);
-                            let scrollback = win.scrollback_size;
-                            if inner_h > 0 && scrollback > 0 {
-                                let total_h = (inner_h as usize + scrollback).max(1);
-                                let thumb_h = ((inner_h as f32 * inner_h as f32) / total_h as f32)
-                                    .round() as u16;
-                                let thumb_h = thumb_h.clamp(1, inner_h);
-                                let available_track = inner_h.saturating_sub(thumb_h);
+                    if btn == MouseButton::Left
+                        && let Some(win) = self.windows.get(&id)
+                    {
+                        let inner_h = win.height.saturating_sub(2);
+                        let scrollback = win.scrollback_size;
+                        if inner_h > 0 && scrollback > 0 {
+                            let total_h = (inner_h as usize + scrollback).max(1);
+                            let thumb_h =
+                                ((inner_h as f32 * inner_h as f32) / total_h as f32).round() as u16;
+                            let thumb_h = thumb_h.clamp(1, inner_h);
+                            let available_track = inner_h.saturating_sub(thumb_h);
 
-                                if available_track > 0 {
-                                    let rel_y = mouse.row.saturating_sub(win.y + 1);
-                                    let rel_y_clamped = rel_y.min(available_track);
-                                    let ratio =
-                                        1.0 - (rel_y_clamped as f32 / available_track as f32);
-                                    let offset = (ratio * scrollback as f32).round() as usize;
+                            if available_track > 0 {
+                                let rel_y = mouse.row.saturating_sub(win.y + 1);
+                                let rel_y_clamped = rel_y.min(available_track);
+                                let ratio = 1.0 - (rel_y_clamped as f32 / available_track as f32);
+                                let offset = (ratio * scrollback as f32).round() as usize;
 
-                                    if offset != win.scroll_offset {
-                                        // Optimistic update for immediate visual feedback
-                                        if let Some(win_mut) = self.windows.get_mut(&id) {
-                                            win_mut.scroll_offset = offset;
-                                        }
-                                        let _ = self.server_tx.try_send(ClientMessage::ScrollTo {
-                                            window_id: id,
-                                            offset,
-                                        });
-                                        return Ok(false);
+                                if offset != win.scroll_offset {
+                                    // Optimistic update for immediate visual feedback
+                                    if let Some(win_mut) = self.windows.get_mut(&id) {
+                                        win_mut.scroll_offset = offset;
                                     }
+                                    let _ = self.server_tx.try_send(ClientMessage::ScrollTo {
+                                        window_id: id,
+                                        offset,
+                                    });
+                                    return Ok(false);
                                 }
                             }
                         }
@@ -960,42 +940,46 @@ impl Client {
                     return Ok(false);
                 }
 
-                if let HitTarget::WindowContent(id) = target {
-                    let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting {
-                        let rel_x = mouse.column.saturating_sub(win.x + 1);
-                        let rel_y = mouse.row.saturating_sub(win.y + 1);
-                        let sgr_btn = match btn {
-                            MouseButton::Left => 32,
-                            MouseButton::Middle => 33,
-                            MouseButton::Right => 34,
-                        };
-                        let data =
-                            format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1).into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
-                    } else if btn == MouseButton::Left {
-                        if let Some((pid, start_y, start_x)) = self.pending_selection {
-                            if pid == id {
-                                let rel_x = mouse.column.saturating_sub(win.x + 1);
-                                let rel_y = mouse.row.saturating_sub(win.y + 1);
-                                if start_y != rel_y || start_x != rel_x {
-                                    self.selection = Some(Selection {
-                                        window_id: id,
-                                        start: (start_y, start_x),
-                                        end: (rel_y, rel_x),
-                                    });
+                if let Some(id) = self.active_window_id {
+                    // Check if mouse is actually over the active window content
+                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                        && let Some(win) = self.windows.get(&id)
+                    {
+                        if win.mouse_reporting {
+                            let rel_x = mouse.column.saturating_sub(win.x + 1);
+                            let rel_y = mouse.row.saturating_sub(win.y + 1);
+                            let sgr_btn = match btn {
+                                MouseButton::Left => 32,
+                                MouseButton::Middle => 33,
+                                MouseButton::Right => 34,
+                            };
+                            let data = format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
+                                .into_bytes();
+                            let _ = self.server_tx.try_send(ClientMessage::Input {
+                                window_id: id,
+                                data,
+                            });
+                        } else if btn == MouseButton::Left {
+                            if let Some((pid, start_y, start_x)) = self.pending_selection {
+                                if pid == id {
+                                    let rel_x = mouse.column.saturating_sub(win.x + 1);
+                                    let rel_y = mouse.row.saturating_sub(win.y + 1);
+                                    if start_y != rel_y || start_x != rel_x {
+                                        self.selection = Some(Selection {
+                                            window_id: id,
+                                            start: (start_y, start_x),
+                                            end: (rel_y, rel_x),
+                                        });
+                                    }
                                 }
+                            } else if let Some(ref mut sel) = self.selection
+                                && sel.window_id == id
+                            {
+                                sel.end = (
+                                    mouse.row.saturating_sub(win.y + 1),
+                                    mouse.column.saturating_sub(win.x + 1),
+                                );
                             }
-                        } else if let Some(ref mut sel) = self.selection
-                            && sel.window_id == id
-                        {
-                            sel.end = (
-                                mouse.row.saturating_sub(win.y + 1),
-                                mouse.column.saturating_sub(win.x + 1),
-                            );
                         }
                     }
                 }
@@ -1034,9 +1018,12 @@ impl Client {
                     self.pending_selection = None;
                 }
 
-                if let HitTarget::WindowContent(id) = target {
-                    let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting {
+                if let Some(id) = self.active_window_id {
+                    // Check if mouse is actually over the active window content
+                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                        && let Some(win) = self.windows.get(&id)
+                        && win.mouse_reporting
+                    {
                         let sgr_btn = match btn {
                             MouseButton::Left => 0,
                             MouseButton::Middle => 1,
@@ -1057,9 +1044,13 @@ impl Client {
                 }
             }
             MouseEventKind::ScrollUp => {
-                if let HitTarget::WindowContent(id) = target {
-                    let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting {
+                if let Some(id) = self.active_window_id {
+                    // Only send scroll events if mouse reporting is enabled for the active window
+                    // AND mouse is over it. General scrolling is now handled via scrollbar.
+                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                        && let Some(win) = self.windows.get(&id)
+                        && win.mouse_reporting
+                    {
                         let data = format!(
                             "\x1b[<64;{};{}M",
                             mouse.column.saturating_sub(win.x + 1) + 1,
@@ -1070,18 +1061,17 @@ impl Client {
                             window_id: id,
                             data,
                         });
-                    } else {
-                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                            window_id: id,
-                            amount: 3,
-                        });
                     }
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let HitTarget::WindowContent(id) = target {
-                    let win = self.windows.get(&id).unwrap();
-                    if win.mouse_reporting {
+                if let Some(id) = self.active_window_id {
+                    // Only send scroll events if mouse reporting is enabled for the active window
+                    // AND mouse is over it. General scrolling is now handled via scrollbar.
+                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                        && let Some(win) = self.windows.get(&id)
+                        && win.mouse_reporting
+                    {
                         let data = format!(
                             "\x1b[<65;{};{}M",
                             mouse.column.saturating_sub(win.x + 1) + 1,
@@ -1091,11 +1081,6 @@ impl Client {
                         let _ = self.server_tx.try_send(ClientMessage::Input {
                             window_id: id,
                             data,
-                        });
-                    } else {
-                        let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                            window_id: id,
-                            amount: -3,
                         });
                     }
                 }
