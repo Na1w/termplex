@@ -28,7 +28,7 @@ use tokio::time::interval;
 use crate::protocol::*;
 use crate::widgets::TerminalWidget;
 
-const DESKBAR_WIDTH: u16 = 20;
+const DESKBAR_WIDTH: u16 = 11;
 
 #[derive(Debug)]
 enum AppEvent {
