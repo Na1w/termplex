@@ -17,8 +17,6 @@ use tokio::time::sleep;
 
 use crate::protocol::*;
 
-const SERVER_STARTUP_WAIT_MS: u64 = 500;
-
 #[derive(Parser)]
 #[command(author, version, about = "A modern terminal multiplexer with window management", long_about = None)]
 struct Cli {
@@ -57,6 +55,92 @@ enum Commands {
         #[arg(short = 'P', long, default_value_t = DEFAULT_PORT)]
         port: u16,
     },
+
+    /// Launch a new terminal window with a command
+    Launch {
+        /// The command to run
+        command: String,
+
+        /// Arguments for the command
+        args: Vec<String>,
+
+        /// Host to connect to
+        #[arg(short = 'H', long, default_value = DEFAULT_BIND_ADDR)]
+        host: String,
+
+        /// Port to connect to
+        #[arg(short = 'P', long, default_value_t = DEFAULT_PORT)]
+        port: u16,
+    },
+}
+
+async fn ensure_server_running(host: &str, port: u16, layout: Option<String>) -> Result<()> {
+    let addr = format!("{}:{}", host, port);
+
+    // Try to connect
+    if TcpStream::connect(&addr).await.is_ok() {
+        return Ok(());
+    }
+
+    // No server running, start one
+    println!("No server found, starting one...");
+
+    // Get our own executable path
+    let exe = env::current_exe()?;
+
+    // Start server in background
+    let mut cmd = Command::new(&exe);
+    cmd.arg("--server")
+        .arg("--host")
+        .arg(host)
+        .arg("--port")
+        .arg(port.to_string());
+    if let Some(ref path) = layout {
+        cmd.arg(path);
+    }
+
+    let _child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+
+    // Wait a bit for server to start and retry connection
+    for _ in 0..10 {
+        sleep(Duration::from_millis(100)).await;
+        if TcpStream::connect(&addr).await.is_ok() {
+            return Ok(());
+        }
+    }
+
+    anyhow::bail!("Failed to start server")
+}
+
+async fn run_launch_command(
+    host: &str,
+    port: u16,
+    command: String,
+    args: Vec<String>,
+) -> Result<()> {
+    ensure_server_running(host, port, None).await?;
+
+    let addr = format!("{}:{}", host, port);
+    let mut stream = TcpStream::connect(&addr).await?;
+
+    // Request new window
+    let msg = ClientMessage::CreateWindow {
+        x: 10,
+        y: 10,
+        width: 82,
+        height: 26,
+        command: Some(command),
+        args,
+    };
+    let data = encode_message(&msg)?;
+    stream.write_all(&data).await?;
+
+    println!("Command sent to server at {}", addr);
+    Ok(())
 }
 
 async fn run_capture_command(host: &str, port: u16, window_id: Option<usize>) -> Result<()> {
@@ -130,6 +214,14 @@ async fn main() -> Result<()> {
             } => {
                 return run_capture_command(&host, port, window_id).await;
             }
+            Commands::Launch {
+                host,
+                port,
+                command,
+                args,
+            } => {
+                return run_launch_command(&host, port, command, args).await;
+            }
         }
     }
 
@@ -141,49 +233,17 @@ async fn main() -> Result<()> {
     // Normal client operation
     let addr = format!("{}:{}", cli.host, cli.port);
 
-    // Try to connect
+    // Ensure server is running (starts one if not found)
+    ensure_server_running(&cli.host, cli.port, cli.layout.clone()).await?;
+
+    // Connect to server
     match TcpStream::connect(&addr).await {
         Ok(stream) => {
             // Server exists, run as client
-            client::run_client(stream, cli.layout).await
+            client::run_client(stream, None).await // Layout already loaded by server
         }
-        Err(_) => {
-            // No server running, start one
-            println!("No server found, starting one...");
-
-            // Get our own executable path
-            let exe = env::current_exe()?;
-
-            // Start server in background
-            let mut cmd = Command::new(&exe);
-            cmd.arg("--server")
-                .arg("--host")
-                .arg(&cli.host)
-                .arg("--port")
-                .arg(cli.port.to_string());
-            if let Some(ref path) = cli.layout {
-                cmd.arg(path);
-            }
-
-            let mut child = cmd
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .spawn()?;
-
-            // Wait a bit for server to start
-            sleep(Duration::from_millis(SERVER_STARTUP_WAIT_MS)).await;
-
-            // Check if server started successfully
-            match TcpStream::connect(&addr).await {
-                Ok(stream) => {
-                    client::run_client(stream, None).await // Layout already loaded by server
-                }
-                Err(e) => {
-                    let _ = child.kill();
-                    anyhow::bail!("Failed to start server: {}", e)
-                }
-            }
+        Err(e) => {
+            anyhow::bail!("Failed to connect to server: {}", e)
         }
     }
 }
