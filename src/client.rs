@@ -733,11 +733,21 @@ impl Client {
                         let rel_y = mouse.row.saturating_sub(win.y + 1);
 
                         if win.mouse_reporting {
-                            let sgr_btn = match btn {
+                            let mut sgr_btn = match btn {
                                 MouseButton::Left => 0,
                                 MouseButton::Middle => 1,
                                 MouseButton::Right => 2,
                             };
+                            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                                sgr_btn += 4;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::ALT) {
+                                sgr_btn += 8;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                                sgr_btn += 16;
+                            }
+
                             let data = format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
                                 .into_bytes();
                             let _ = self.server_tx.try_send(ClientMessage::Input {
@@ -948,13 +958,24 @@ impl Client {
                         if win.mouse_reporting {
                             let rel_x = mouse.column.saturating_sub(win.x + 1);
                             let rel_y = mouse.row.saturating_sub(win.y + 1);
-                            let sgr_btn = match btn {
+                            let mut sgr_btn = match btn {
                                 MouseButton::Left => 32,
                                 MouseButton::Middle => 33,
                                 MouseButton::Right => 34,
                             };
-                            let data = format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
-                                .into_bytes();
+                            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                                sgr_btn += 4;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::ALT) {
+                                sgr_btn += 8;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                                sgr_btn += 16;
+                            }
+
+                            let data =
+                                format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
+                                    .into_bytes();
                             let _ = self.server_tx.try_send(ClientMessage::Input {
                                 window_id: id,
                                 data,
@@ -1019,27 +1040,35 @@ impl Client {
                 }
 
                 if let Some(id) = self.active_window_id {
-                    // Check if mouse is actually over the active window content
-                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
-                        && let Some(win) = self.windows.get(&id)
-                        && win.mouse_reporting
-                    {
-                        let sgr_btn = match btn {
-                            MouseButton::Left => 0,
-                            MouseButton::Middle => 1,
-                            MouseButton::Right => 2,
-                        };
-                        let data = format!(
-                            "\x1b[<{};{};{}m",
-                            sgr_btn,
-                            mouse.column.saturating_sub(win.x + 1) + 1,
-                            mouse.row.saturating_sub(win.y + 1) + 1
-                        )
-                        .into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
+                    if let Some(win) = self.windows.get(&id) {
+                        if win.mouse_reporting {
+                            let mut sgr_btn = match btn {
+                                MouseButton::Left => 0,
+                                MouseButton::Middle => 1,
+                                MouseButton::Right => 2,
+                            };
+                            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                                sgr_btn += 4;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::ALT) {
+                                sgr_btn += 8;
+                            }
+                            if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                                sgr_btn += 16;
+                            }
+
+                            let data = format!(
+                                "\x1b[<{};{};{}m",
+                                sgr_btn,
+                                mouse.column.saturating_sub(win.x + 1) + 1,
+                                mouse.row.saturating_sub(win.y + 1) + 1
+                            )
+                            .into_bytes();
+                            let _ = self.server_tx.try_send(ClientMessage::Input {
+                                window_id: id,
+                                data,
+                            });
+                        }
                     }
                 }
             }
