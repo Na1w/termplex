@@ -586,14 +586,20 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                 effective_screen_size = recalculate_effective_size(&client_sizes);
 
                 // Send welcome with current state
-                let windows = {
+                let (windows, solo_active, solo_id) = {
                     let st = state.lock().unwrap();
-                    st.get_all_window_states()
+                    (
+                        st.get_all_window_states(),
+                        st.solo_mode_origin.is_some(),
+                        st.solo_mode_origin,
+                    )
                 };
 
                 let welcome = ServerMessage::Welcome {
                     session_id: id,
                     windows,
+                    solo_mode_active: solo_active,
+                    solo_origin_id: solo_id,
                 };
 
                 if let Some(tx) = client_writers.get(&id)
@@ -662,11 +668,19 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             config,
                             effective_screen_size,
                         ) {
-                            let windows = {
+                            let (windows, solo_active, solo_id) = {
                                 let st = state.lock().unwrap();
-                                st.get_all_window_states()
+                                (
+                                    st.get_all_window_states(),
+                                    st.solo_mode_origin.is_some(),
+                                    st.solo_mode_origin,
+                                )
                             };
-                            let msg = ServerMessage::FullSync { windows };
+                            let msg = ServerMessage::FullSync {
+                                windows,
+                                solo_mode_active: solo_active,
+                                solo_origin_id: solo_id,
+                            };
                             broadcast_to_all(&client_writers, &msg);
                         }
                     }
@@ -717,13 +731,24 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             }
 
                             // 3. Get final state and sync
-                            let windows = {
+                            let (windows, solo_active, solo_id) = {
                                 let st = state.lock().unwrap();
-                                st.get_all_window_states()
+                                (
+                                    st.get_all_window_states(),
+                                    st.solo_mode_origin.is_some(),
+                                    st.solo_mode_origin,
+                                )
                             };
 
                             // Send a single full sync to all clients
-                            broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                            broadcast_to_all(
+                                &client_writers,
+                                &ServerMessage::FullSync {
+                                    windows,
+                                    solo_mode_active: solo_active,
+                                    solo_origin_id: solo_id,
+                                },
+                            );
                         }
                     }
 
@@ -836,25 +861,44 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                     }
 
                     ClientMessage::CloseWindow { window_id } => {
-                        let windows = {
+                        let (windows, solo_active, solo_id) = {
                             let mut st = state.lock().unwrap();
                             st.remove_window(window_id);
-                            st.get_all_window_states()
+                            (
+                                st.get_all_window_states(),
+                                st.solo_mode_origin.is_some(),
+                                st.solo_mode_origin,
+                            )
                         };
                         broadcast_to_all(
                             &client_writers,
                             &ServerMessage::WindowClosed { window_id },
                         );
-                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                        broadcast_to_all(
+                            &client_writers,
+                            &ServerMessage::FullSync {
+                                windows,
+                                solo_mode_active: solo_active,
+                                solo_origin_id: solo_id,
+                            },
+                        );
                     }
 
                     ClientMessage::FocusWindow { window_id } => {
-                        let windows = {
+                        let (windows, solo_active, solo_id) = {
                             let mut st = state.lock().unwrap();
                             st.focus_window(window_id);
-                            st.get_all_window_states()
+                            (
+                                st.get_all_window_states(),
+                                st.solo_mode_origin.is_some(),
+                                st.solo_mode_origin,
+                            )
                         };
-                        let msg = ServerMessage::FullSync { windows };
+                        let msg = ServerMessage::FullSync {
+                            windows,
+                            solo_mode_active: solo_active,
+                            solo_origin_id: solo_id,
+                        };
                         broadcast_to_all(&client_writers, &msg);
                     }
 
@@ -969,7 +1013,54 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                         // Broadcast full sync to update all clients
                         let windows = st.get_all_window_states();
-                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                        let solo_active = st.solo_mode_origin.is_some();
+                        let solo_id = st.solo_mode_origin;
+                        broadcast_to_all(
+                            &client_writers,
+                            &ServerMessage::FullSync {
+                                windows,
+                                solo_mode_active: solo_active,
+                                solo_origin_id: solo_id,
+                            },
+                        );
+                    }
+
+                    ClientMessage::TemporaryExpand { window_id } => {
+                        let ws = {
+                            let mut st = state.lock().unwrap();
+                            let window_order = st.window_order.clone();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                win.minimized = false;
+                                let new_ws = build_window_state(win, &window_order);
+                                win.update_last_state(&new_ws);
+                                Some(new_ws)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(ws) = ws {
+                            let msg = ServerMessage::WindowUpdate { window: ws };
+                            broadcast_to_all(&client_writers, &msg);
+                        }
+                    }
+
+                    ClientMessage::TemporaryCollapse { window_id } => {
+                        let ws = {
+                            let mut st = state.lock().unwrap();
+                            let window_order = st.window_order.clone();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                win.minimized = true;
+                                let new_ws = build_window_state(win, &window_order);
+                                win.update_last_state(&new_ws);
+                                Some(new_ws)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(ws) = ws {
+                            let msg = ServerMessage::WindowUpdate { window: ws };
+                            broadcast_to_all(&client_writers, &msg);
+                        }
                     }
 
                     ClientMessage::TileWindows => {
@@ -1023,7 +1114,16 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         }
 
                         let windows = st.get_all_window_states();
-                        broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                        let solo_active = st.solo_mode_origin.is_some();
+                        let solo_id = st.solo_mode_origin;
+                        broadcast_to_all(
+                            &client_writers,
+                            &ServerMessage::FullSync {
+                                windows,
+                                solo_mode_active: solo_active,
+                                solo_origin_id: solo_id,
+                            },
+                        );
                     }
 
                     ClientMessage::ResizeWindow {
@@ -1404,10 +1504,14 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
             }
 
             ServerEvent::WindowClosed(id) => {
-                let windows = {
+                let (windows, solo_active, solo_id) = {
                     let mut st = state.lock().unwrap();
                     st.remove_window(id);
-                    st.get_all_window_states()
+                    (
+                        st.get_all_window_states(),
+                        st.solo_mode_origin.is_some(),
+                        st.solo_mode_origin,
+                    )
                 };
 
                 // Broadcast closed event
@@ -1417,7 +1521,14 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                 );
 
                 // Sync all windows to update focus and z-order
-                broadcast_to_all(&client_writers, &ServerMessage::FullSync { windows });
+                broadcast_to_all(
+                    &client_writers,
+                    &ServerMessage::FullSync {
+                        windows,
+                        solo_mode_active: solo_active,
+                        solo_origin_id: solo_id,
+                    },
+                );
 
                 // Exit if no more windows and no clients
                 let st = state.lock().unwrap();

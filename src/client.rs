@@ -98,6 +98,9 @@ struct Client {
     last_click: Option<(usize, std::time::Instant)>,
     server_tx: mpsc::Sender<ClientMessage>,
     hit_map: Vec<HitTarget>,
+    solo_mode_active: bool,
+    solo_origin_id: Option<usize>,
+    temporarily_expanded_id: Option<usize>,
 }
 
 impl Client {
@@ -119,6 +122,9 @@ impl Client {
             last_click: None,
             server_tx,
             hit_map: vec![HitTarget::None; size],
+            solo_mode_active: false,
+            solo_origin_id: None,
+            temporarily_expanded_id: None,
         }
     }
 
@@ -457,6 +463,26 @@ impl Client {
                             KeyCode::Enter => {
                                 return self.execute_menu_item(self.menu, self.selected_item);
                             }
+                            KeyCode::Char(c) => {
+                                let target_idx = match (self.menu, c.to_ascii_lowercase()) {
+                                    (Menu::File, 'n') => Some(0),
+                                    (Menu::File, 'o') => Some(1),
+                                    (Menu::File, 'i') => Some(2),
+                                    (Menu::File, 'v') => Some(3),
+                                    (Menu::File, 'p') => Some(4),
+                                    (Menu::File, 'q') => Some(5),
+                                    (Menu::Window, 'z') => Some(0),
+                                    (Menu::Window, 'x') => Some(1),
+                                    (Menu::Window, 'c') => Some(2),
+                                    (Menu::Window, 's') => Some(3),
+                                    (Menu::Window, 'f') => Some(4),
+                                    (Menu::Window, 'g') => Some(5),
+                                    _ => None,
+                                };
+                                if let Some(idx) = target_idx {
+                                    return self.execute_menu_item(self.menu, idx);
+                                }
+                            }
                             _ => {}
                         }
                         return Ok(false);
@@ -473,9 +499,17 @@ impl Client {
                 _ => {}
             },
             AppEvent::Server(msg) => match msg {
-                ServerMessage::Welcome { windows, .. } => {
+                ServerMessage::Welcome {
+                    windows,
+                    solo_mode_active,
+                    solo_origin_id,
+                    ..
+                } => {
                     self.windows.clear();
                     self.active_window_id = None;
+                    self.solo_mode_active = solo_mode_active;
+                    self.solo_origin_id = solo_origin_id;
+                    self.temporarily_expanded_id = None;
                     for win in windows {
                         if win.focused {
                             self.active_window_id = Some(win.id);
@@ -483,9 +517,16 @@ impl Client {
                         self.windows.insert(win.id, win);
                     }
                 }
-                ServerMessage::FullSync { windows } => {
+                ServerMessage::FullSync {
+                    windows,
+                    solo_mode_active,
+                    solo_origin_id,
+                } => {
                     self.windows.clear();
                     self.active_window_id = None;
+                    self.solo_mode_active = solo_mode_active;
+                    self.solo_origin_id = solo_origin_id;
+                    self.temporarily_expanded_id = None;
                     for win in windows {
                         if win.focused {
                             self.active_window_id = Some(win.id);
@@ -648,6 +689,80 @@ impl Client {
     fn handle_mouse(&mut self, mouse: crossterm::event::MouseEvent) -> Result<bool> {
         self.last_mouse_pos = (mouse.column, mouse.row);
         let target = self.get_hit(mouse.column, mouse.row);
+
+        // --- HOVER EXPAND (Solo Mode) ---
+        if self.solo_mode_active && matches!(mouse.kind, MouseEventKind::Moved) {
+            let mut should_collapse_current = false;
+            let mut new_expand_id = None;
+
+            match target {
+                HitTarget::WindowTitle(id) if Some(id) != self.solo_origin_id => {
+                    if self.temporarily_expanded_id != Some(id)
+                        && self.windows.get(&id).map(|w| w.minimized).unwrap_or(false)
+                    {
+                        new_expand_id = Some(id);
+                    }
+                    // If it's already the expanded one, we stay expanded (do nothing)
+                }
+                _ => {
+                    // Not over a non-solo title bar.
+                    if let Some(tid) = self.temporarily_expanded_id {
+                        let still_over = match target {
+                            HitTarget::WindowContent(id)
+                            | HitTarget::WindowTitle(id)
+                            | HitTarget::WindowBorder(id)
+                            | HitTarget::WindowResize(id)
+                            | HitTarget::CloseButton(id)
+                            | HitTarget::MinimizeButton(id)
+                            | HitTarget::MaximizeButton(id)
+                            | HitTarget::FullscreenButton(id)
+                            | HitTarget::SoloButton(id)
+                            | HitTarget::ResetButton(id)
+                            | HitTarget::WindowScrollbar(id) => id == tid,
+                            _ => false,
+                        };
+                        if !still_over {
+                            should_collapse_current = true;
+                        }
+                    }
+                }
+            }
+
+            if let Some(id) = new_expand_id {
+                // Collapse old if any
+                if let Some(tid) = self.temporarily_expanded_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::TemporaryCollapse { window_id: tid });
+                }
+                // Expand new
+                let _ = self
+                    .server_tx
+                    .try_send(ClientMessage::TemporaryExpand { window_id: id });
+                self.temporarily_expanded_id = Some(id);
+            } else if should_collapse_current && let Some(tid) = self.temporarily_expanded_id {
+                let _ = self
+                    .server_tx
+                    .try_send(ClientMessage::TemporaryCollapse { window_id: tid });
+                self.temporarily_expanded_id = None;
+            }
+        }
+
+        // --- MOUSE MOVE FORWARDING (for nested TermPlex/Apps) ---
+        if let MouseEventKind::Moved = mouse.kind
+            && let HitTarget::WindowContent(id) = target
+            && let Some(win) = self.windows.get(&id)
+            && win.mouse_reporting
+        {
+            let rel_x = mouse.column.saturating_sub(win.x + 1);
+            let rel_y = mouse.row.saturating_sub(win.y + 1);
+            // Button 35 is Move with no button pressed in SGR 1006
+            let data = format!("\x1b[<35;{};{}M", rel_x + 1, rel_y + 1).into_bytes();
+            let _ = self.server_tx.try_send(ClientMessage::Input {
+                window_id: id,
+                data,
+            });
+        }
 
         // --- 0. INTERCEPT DRAGS ---
         if let Some(ref state) = self.drag_state {
@@ -973,9 +1088,8 @@ impl Client {
                                 sgr_btn += 16;
                             }
 
-                            let data =
-                                format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
-                                    .into_bytes();
+                            let data = format!("\x1b[<{};{};{}M", sgr_btn, rel_x + 1, rel_y + 1)
+                                .into_bytes();
                             let _ = self.server_tx.try_send(ClientMessage::Input {
                                 window_id: id,
                                 data,
@@ -1039,79 +1153,72 @@ impl Client {
                     self.pending_selection = None;
                 }
 
-                if let Some(id) = self.active_window_id {
-                    if let Some(win) = self.windows.get(&id) {
-                        if win.mouse_reporting {
-                            let mut sgr_btn = match btn {
-                                MouseButton::Left => 0,
-                                MouseButton::Middle => 1,
-                                MouseButton::Right => 2,
-                            };
-                            if mouse.modifiers.contains(KeyModifiers::SHIFT) {
-                                sgr_btn += 4;
-                            }
-                            if mouse.modifiers.contains(KeyModifiers::ALT) {
-                                sgr_btn += 8;
-                            }
-                            if mouse.modifiers.contains(KeyModifiers::CONTROL) {
-                                sgr_btn += 16;
-                            }
-
-                            let data = format!(
-                                "\x1b[<{};{};{}m",
-                                sgr_btn,
-                                mouse.column.saturating_sub(win.x + 1) + 1,
-                                mouse.row.saturating_sub(win.y + 1) + 1
-                            )
-                            .into_bytes();
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
-                        }
+                if let Some(id) = self.active_window_id
+                    && let Some(win) = self.windows.get(&id)
+                    && win.mouse_reporting
+                {
+                    let mut sgr_btn = match btn {
+                        MouseButton::Left => 0,
+                        MouseButton::Middle => 1,
+                        MouseButton::Right => 2,
+                    };
+                    if mouse.modifiers.contains(KeyModifiers::SHIFT) {
+                        sgr_btn += 4;
                     }
+                    if mouse.modifiers.contains(KeyModifiers::ALT) {
+                        sgr_btn += 8;
+                    }
+                    if mouse.modifiers.contains(KeyModifiers::CONTROL) {
+                        sgr_btn += 16;
+                    }
+
+                    let data = format!(
+                        "\x1b[<{};{};{}m",
+                        sgr_btn,
+                        mouse.column.saturating_sub(win.x + 1) + 1,
+                        mouse.row.saturating_sub(win.y + 1) + 1
+                    )
+                    .into_bytes();
+                    let _ = self.server_tx.try_send(ClientMessage::Input {
+                        window_id: id,
+                        data,
+                    });
                 }
             }
             MouseEventKind::ScrollUp => {
-                if let Some(id) = self.active_window_id {
-                    // Only send scroll events if mouse reporting is enabled for the active window
-                    // AND mouse is over it. General scrolling is now handled via scrollbar.
-                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
-                        && let Some(win) = self.windows.get(&id)
-                        && win.mouse_reporting
-                    {
-                        let data = format!(
-                            "\x1b[<64;{};{}M",
-                            mouse.column.saturating_sub(win.x + 1) + 1,
-                            mouse.row.saturating_sub(win.y + 1) + 1
-                        )
-                        .into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
-                    }
+                if let Some(id) = self.active_window_id
+                    && matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                    && let Some(win) = self.windows.get(&id)
+                    && win.mouse_reporting
+                {
+                    let data = format!(
+                        "\x1b[<64;{};{}M",
+                        mouse.column.saturating_sub(win.x + 1) + 1,
+                        mouse.row.saturating_sub(win.y + 1) + 1
+                    )
+                    .into_bytes();
+                    let _ = self.server_tx.try_send(ClientMessage::Input {
+                        window_id: id,
+                        data,
+                    });
                 }
             }
             MouseEventKind::ScrollDown => {
-                if let Some(id) = self.active_window_id {
-                    // Only send scroll events if mouse reporting is enabled for the active window
-                    // AND mouse is over it. General scrolling is now handled via scrollbar.
-                    if matches!(target, HitTarget::WindowContent(tid) if tid == id)
-                        && let Some(win) = self.windows.get(&id)
-                        && win.mouse_reporting
-                    {
-                        let data = format!(
-                            "\x1b[<65;{};{}M",
-                            mouse.column.saturating_sub(win.x + 1) + 1,
-                            mouse.row.saturating_sub(win.y + 1) + 1
-                        )
-                        .into_bytes();
-                        let _ = self.server_tx.try_send(ClientMessage::Input {
-                            window_id: id,
-                            data,
-                        });
-                    }
+                if let Some(id) = self.active_window_id
+                    && matches!(target, HitTarget::WindowContent(tid) if tid == id)
+                    && let Some(win) = self.windows.get(&id)
+                    && win.mouse_reporting
+                {
+                    let data = format!(
+                        "\x1b[<65;{};{}M",
+                        mouse.column.saturating_sub(win.x + 1) + 1,
+                        mouse.row.saturating_sub(win.y + 1) + 1
+                    )
+                    .into_bytes();
+                    let _ = self.server_tx.try_send(ClientMessage::Input {
+                        window_id: id,
+                        data,
+                    });
                 }
             }
             _ => {}
@@ -1340,7 +1447,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                         let inner_area = Rect::new(
                             win.x + 1,
                             win.y + 1,
-                            win.width.saturating_sub(2),
+                            win.width.saturating_sub(3),
                             win.height.saturating_sub(2),
                         )
                         .intersection(window_area);

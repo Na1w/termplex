@@ -68,6 +68,12 @@ pub enum ClientMessage {
     /// Toggle solo mode for a window (minimize all others)
     ToggleSolo { window_id: usize },
 
+    /// Temporarily expand a window in solo mode
+    TemporaryExpand { window_id: usize },
+
+    /// Temporarily collapse a window back in solo mode
+    TemporaryCollapse { window_id: usize },
+
     /// Auto-tile all non-minimized windows
     TileWindows,
 
@@ -189,10 +195,20 @@ pub enum ServerMessage {
         session_id: u64,
         /// Current windows
         windows: Vec<WindowState>,
+        /// Whether solo mode is currently active
+        solo_mode_active: bool,
+        /// The window ID that triggered solo mode
+        solo_origin_id: Option<usize>,
     },
 
     /// Full state sync (all windows)
-    FullSync { windows: Vec<WindowState> },
+    FullSync {
+        windows: Vec<WindowState>,
+        /// Whether solo mode is currently active
+        solo_mode_active: bool,
+        /// The window ID that triggered solo mode
+        solo_origin_id: Option<usize>,
+    },
 
     /// Single window updated
     WindowUpdate { window: WindowState },
