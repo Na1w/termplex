@@ -496,7 +496,8 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                         if accum.len() < 4 + len {
                                             break;
                                         }
-                                        let config = bincode::config::legacy();
+                                        let config =
+                                            bincode::config::standard().with_fixed_int_encoding();
                                         if let Ok((msg, _)) =
                                             bincode::serde::decode_from_slice::<ClientMessage, _>(
                                                 &accum[4..4 + len],
@@ -662,12 +663,22 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             title: None,
                         };
 
-                        if let Ok(_id) = spawn_window(
+                        if let Ok(id) = spawn_window(
                             state.clone(),
                             event_tx.clone(),
                             config,
                             effective_screen_size,
                         ) {
+                            // Send direct confirmation to the requester
+                            if let Some(tx) = client_writers.get(&client_id)
+                                && let Ok(data) =
+                                    encode_message(&ServerMessage::WindowCreatedConfirmation {
+                                        window_id: id,
+                                    })
+                            {
+                                let _ = tx.try_send(data);
+                            }
+
                             let (windows, solo_active, solo_id) = {
                                 let st = state.lock().unwrap();
                                 (

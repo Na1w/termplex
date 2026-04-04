@@ -121,11 +121,18 @@ async fn run_launch_command(
     port: u16,
     command: String,
     args: Vec<String>,
-) -> Result<()> {
+) -> Result<usize> {
     ensure_server_running(host, port, None).await?;
 
     let addr = format!("{}:{}", host, port);
     let mut stream = TcpStream::connect(&addr).await?;
+
+    // Send initial connect
+    let connect_msg = ClientMessage::Connect {
+        term_size: (80, 24),
+    };
+    let connect_data = encode_message(&connect_msg)?;
+    stream.write_all(&connect_data).await?;
 
     // Request new window
     let msg = ClientMessage::CreateWindow {
@@ -139,8 +146,36 @@ async fn run_launch_command(
     let data = encode_message(&msg)?;
     stream.write_all(&data).await?;
 
-    println!("Command sent to server at {}", addr);
-    Ok(())
+    // Wait for ID confirmation
+    let mut buf = [0u8; 4096];
+    let mut accum = Vec::new();
+    loop {
+        let n = stream.read(&mut buf).await?;
+        if n == 0 {
+            break;
+        }
+        accum.extend_from_slice(&buf[..n]);
+
+        while accum.len() >= 4 {
+            let len = u32::from_be_bytes([accum[0], accum[1], accum[2], accum[3]]) as usize;
+            if accum.len() < 4 + len {
+                break;
+            }
+
+            let config = bincode::config::standard().with_fixed_int_encoding();
+            let decode_res =
+                bincode::serde::decode_from_slice::<ServerMessage, _>(&accum[4..4 + len], config);
+
+            if let Ok((msg, _)) = decode_res {
+                if let ServerMessage::WindowCreatedConfirmation { window_id } = msg {
+                    return Ok(window_id);
+                }
+            }
+            accum.drain(0..4 + len);
+        }
+    }
+
+    anyhow::bail!("Failed to get window ID from server")
 }
 
 async fn run_capture_command(host: &str, port: u16, window_id: Option<usize>) -> Result<()> {
@@ -220,7 +255,9 @@ async fn main() -> Result<()> {
                 command,
                 args,
             } => {
-                return run_launch_command(&host, port, command, args).await;
+                let id = run_launch_command(&host, port, command, args).await?;
+                println!("{}", id);
+                return Ok(());
             }
         }
     }

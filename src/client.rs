@@ -552,6 +552,9 @@ impl Client {
                     self.windows.remove(&window_id);
                     // active_window_id will be updated by the following FullSync from server
                 }
+                ServerMessage::WindowCreatedConfirmation { .. } => {
+                    // Handled by launch command, safe to ignore here
+                }
                 ServerMessage::ScreenDiff {
                     window_id,
                     cells,

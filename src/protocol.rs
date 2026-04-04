@@ -216,7 +216,10 @@ pub enum ServerMessage {
     /// Window closed
     WindowClosed { window_id: usize },
 
-    /// New window created
+    /// Confirmation of window creation with its ID
+    WindowCreatedConfirmation { window_id: usize },
+
+    /// New window created (broadcast)
     WindowCreated { window: WindowState },
 
     /// Sparse screen update (only changed cells)
