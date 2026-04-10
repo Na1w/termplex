@@ -24,6 +24,7 @@ pub struct Terminal {
     pub exit_code: Arc<Mutex<Option<i32>>>,
     pub child_pid: u32,
     pub total_lines: Arc<std::sync::atomic::AtomicUsize>,
+    pub current_rows: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Terminal {
@@ -82,6 +83,8 @@ impl Terminal {
 
         let total_lines = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
         let total_lines_clone = total_lines.clone();
+        let current_rows = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
+        let current_rows_clone = current_rows.clone();
 
         let tx = event_tx.clone();
         thread::spawn(move || {
@@ -103,7 +106,8 @@ impl Terminal {
                         if data.windows(4).any(|w| w == b"\x1b[3J")
                             || data.windows(5).any(|w| w == b"\x1b[;3J")
                         {
-                            total_lines_clone.store(rows as usize, Ordering::SeqCst);
+                            let current = current_rows_clone.load(Ordering::SeqCst);
+                            total_lines_clone.store(current, Ordering::SeqCst);
                         }
 
                         // Check for OSC 52: ESC ] 52 ; c ; <base64> BEL (or ST)
@@ -161,6 +165,7 @@ impl Terminal {
             exit_code,
             child_pid,
             total_lines,
+            current_rows,
         })
     }
 
@@ -170,7 +175,8 @@ impl Terminal {
         Ok(())
     }
 
-    pub fn resize(&mut self, rows: u16, cols: u16) -> Result<()> {
+    pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        self.current_rows.store(rows as usize, Ordering::SeqCst);
         self.master.resize(PtySize {
             rows,
             cols,

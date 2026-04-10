@@ -13,7 +13,7 @@ use ratatui::{
     backend::CrosstermBackend,
     layout::{Alignment, Rect},
     style::{Color, Modifier, Style},
-    text::Line,
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph},
 };
 use std::collections::HashMap;
@@ -81,6 +81,7 @@ enum HitTarget {
     SoloButton(usize),
     ResetButton(usize),
     WindowScrollbar(usize),
+    DeskbarMinimizeButton,
 }
 
 struct Client {
@@ -103,6 +104,7 @@ struct Client {
     solo_mode_active: bool,
     solo_origin_id: Option<usize>,
     temporarily_expanded_id: Option<usize>,
+    deskbar_minimized: bool,
 }
 
 impl Client {
@@ -129,6 +131,7 @@ impl Client {
             solo_mode_active: false,
             solo_origin_id: None,
             temporarily_expanded_id: None,
+            deskbar_minimized: false,
         }
     }
 
@@ -247,16 +250,26 @@ impl Client {
 
         // --- 2. Deskbar (Always on top) ---
         if !has_fullscreen {
-            let deskbar_height = (self.windows.len() as u16 + 2).max(3);
-            let deskbar_x_start = size.width.saturating_sub(DESKBAR_WIDTH);
-            for y in 0..deskbar_height {
-                for x in deskbar_x_start..size.width {
-                    let target = if y >= 1 && y < deskbar_height - 1 {
-                        HitTarget::Deskbar((y - 1) as usize)
-                    } else {
-                        HitTarget::None
-                    };
-                    self.set_hit(x, y, target);
+            if self.deskbar_minimized {
+                // Only a small button in the top right corner of the menu bar area
+                let x = size.width.saturating_sub(4);
+                for dx in 0..4 {
+                    self.set_hit(x + dx, 0, HitTarget::DeskbarMinimizeButton);
+                }
+            } else {
+                let deskbar_height = (self.windows.len() as u16 + 2).max(3);
+                let deskbar_x_start = size.width.saturating_sub(DESKBAR_WIDTH);
+                for y in 0..deskbar_height {
+                    for x in deskbar_x_start..size.width {
+                        let target = if y == 0 && x >= size.width.saturating_sub(4) {
+                            HitTarget::DeskbarMinimizeButton
+                        } else if y >= 1 && y < deskbar_height - 1 {
+                            HitTarget::Deskbar((y - 1) as usize)
+                        } else {
+                            HitTarget::None
+                        };
+                        self.set_hit(x, y, target);
+                    }
                 }
             }
         }
@@ -878,6 +891,11 @@ impl Client {
                                     .server_tx
                                     .try_send(ClientMessage::FocusWindow { window_id: wid });
                             }
+                        }
+                    }
+                    HitTarget::DeskbarMinimizeButton => {
+                        if btn == MouseButton::Left {
+                            self.deskbar_minimized = !self.deskbar_minimized;
                         }
                     }
                     HitTarget::WindowContent(id) => {
@@ -1684,48 +1702,65 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
 
                 // --- DESKBAR (Overlay, Dynamic Height) ---
                 if !has_fullscreen {
-                    let deskbar_height = (client.windows.len() as u16 + 2).max(3);
-                    let deskbar_area = Rect::new(
-                        size.width.saturating_sub(DESKBAR_WIDTH),
-                        0,
-                        DESKBAR_WIDTH,
-                        deskbar_height,
-                    );
-
-                    f.render_widget(Clear, deskbar_area);
-                    f.render_widget(
-                        Block::default()
-                            .borders(Borders::ALL)
-                            .border_style(Style::default().fg(Color::Rgb(50, 50, 100)))
-                            .title(" TP ")
-                            .style(Style::default().bg(Color::Rgb(15, 15, 30))),
-                        deskbar_area,
-                    );
-
-                    let mut windows_sorted: Vec<_> = client.windows.values().collect();
-                    windows_sorted.sort_by_key(|w| w.id);
-                    for (i, win) in windows_sorted.iter().enumerate() {
-                        let style = if win.focused {
-                            Style::default()
-                                .bg(Color::Cyan)
-                                .fg(Color::Black)
-                                .add_modifier(Modifier::BOLD)
-                        } else if !win.running {
-                            Style::default().fg(Color::Red)
-                        } else {
-                            Style::default().fg(Color::White)
-                        };
-                        let prefix = if win.focused { "> " } else { "  " };
-                        let text = format!("{}{}", prefix, win.title);
+                    if client.deskbar_minimized {
+                        // Render a tiny [+] button in the top right corner of the menu bar
+                        let deskbar_area = Rect::new(size.width.saturating_sub(4), 0, 4, 1);
+                        f.render_widget(Clear, deskbar_area);
                         f.render_widget(
-                            Paragraph::new(text).style(style),
-                            Rect::new(
-                                deskbar_area.x + 1,
-                                1 + i as u16,
-                                DESKBAR_WIDTH.saturating_sub(2),
-                                1,
-                            ),
+                            Paragraph::new(" [+] ")
+                                .style(Style::default().bg(Color::Rgb(15, 15, 30)).fg(Color::Cyan)),
+                            deskbar_area,
                         );
+                    } else {
+                        let deskbar_height = (client.windows.len() as u16 + 2).max(3);
+                        let deskbar_area = Rect::new(
+                            size.width.saturating_sub(DESKBAR_WIDTH),
+                            0,
+                            DESKBAR_WIDTH,
+                            deskbar_height,
+                        );
+
+                        f.render_widget(Clear, deskbar_area);
+                        f.render_widget(
+                            Block::default()
+                                .borders(Borders::ALL)
+                                .border_style(Style::default().fg(Color::Rgb(50, 50, 100)))
+                                .title(
+                                    Line::from(vec![
+                                        Span::raw(" TP "),
+                                        Span::styled("[-] ", Style::default().fg(Color::Cyan)),
+                                    ])
+                                    .alignment(Alignment::Right),
+                                )
+                                .style(Style::default().bg(Color::Rgb(15, 15, 30))),
+                            deskbar_area,
+                        );
+
+                        let mut windows_sorted: Vec<_> = client.windows.values().collect();
+                        windows_sorted.sort_by_key(|w| w.id);
+                        for (i, win) in windows_sorted.iter().enumerate() {
+                            let style = if win.focused {
+                                Style::default()
+                                    .bg(Color::Cyan)
+                                    .fg(Color::Black)
+                                    .add_modifier(Modifier::BOLD)
+                            } else if !win.running {
+                                Style::default().fg(Color::Red)
+                            } else {
+                                Style::default().fg(Color::White)
+                            };
+                            let prefix = if win.focused { "> " } else { "  " };
+                            let text = format!("{}{}", prefix, win.title);
+                            f.render_widget(
+                                Paragraph::new(text).style(style),
+                                Rect::new(
+                                    deskbar_area.x + 1,
+                                    1 + i as u16,
+                                    DESKBAR_WIDTH.saturating_sub(2),
+                                    1,
+                                ),
+                            );
+                        }
                     }
                 }
             })?;
