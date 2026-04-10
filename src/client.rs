@@ -1,4 +1,5 @@
 use anyhow::Result;
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use crossterm::{
     event::{
         self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEvent, KeyModifiers,
@@ -88,6 +89,7 @@ struct Client {
     menu: Menu,
     selected_item: usize,
     clipboard: String,
+    clipboard_manager: Option<arboard::Clipboard>,
     selection: Option<Selection>,
     pending_selection: Option<(usize, u16, u16)>,
     drag_state: Option<DragState>,
@@ -106,12 +108,14 @@ struct Client {
 impl Client {
     fn new(screen_size: Rect, server_tx: mpsc::Sender<ClientMessage>) -> Self {
         let size = (screen_size.width as usize) * (screen_size.height as usize);
+        let clipboard_manager = arboard::Clipboard::new().ok();
         Self {
             windows: HashMap::new(),
             active_window_id: None,
             menu: Menu::None,
             selected_item: 0,
             clipboard: String::new(),
+            clipboard_manager,
             selection: None,
             pending_selection: None,
             drag_state: None,
@@ -271,7 +275,7 @@ impl Client {
                 if self.menu == m {
                     let items_count = match m {
                         Menu::File => 6,
-                        Menu::Window => 6,
+                        Menu::Window => 7,
                         _ => 0,
                     };
                     // Approximate dropdown width (matched with rendering)
@@ -293,6 +297,28 @@ impl Client {
                 x_offset += label_len + 2;
             }
         }
+    }
+
+    fn send_osc52_copy(&self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let b64 = BASE64.encode(text);
+
+        // Standard OSC 52: ESC ] 52 ; c ; <base64> ST
+        let osc = format!("\x1b]52;c;{}\x1b\\", b64);
+
+        // Tmux bypass: ESC P tmux ; ESC <standard_osc> ESC \
+        let tmux_osc = format!("\x1bPtmux;\x1b\x1b]52;c;{}\x07\x1b\\", b64);
+
+        // Screen bypass: ESC P \x1b]52;c;... \x07 ESC \
+        let screen_osc = format!("\x1bP\x1b]52;c;{}\x07\x1b\\", b64);
+
+        let mut stdout = io::stdout();
+        let _ = io::Write::write_all(&mut stdout, osc.as_bytes());
+        let _ = io::Write::write_all(&mut stdout, tmux_osc.as_bytes());
+        let _ = io::Write::write_all(&mut stdout, screen_osc.as_bytes());
+        let _ = io::Write::flush(&mut stdout);
     }
 
     fn execute_menu_item(&mut self, menu: Menu, idx: usize) -> Result<bool> {
@@ -377,6 +403,13 @@ impl Client {
             (Menu::Window, 5) => {
                 let _ = self.server_tx.try_send(ClientMessage::TileWindows);
             }
+            (Menu::Window, 6) => {
+                if let Some(id) = self.active_window_id {
+                    let _ = self
+                        .server_tx
+                        .try_send(ClientMessage::ClearScrollback { window_id: id });
+                }
+            }
             _ => {}
         }
         self.menu = Menu::None;
@@ -437,7 +470,7 @@ impl Client {
                             KeyCode::Down => {
                                 let items_count: usize = match self.menu {
                                     Menu::File => 6,
-                                    Menu::Window => 6,
+                                    Menu::Window => 7,
                                     _ => 0,
                                 };
                                 if self.selected_item < items_count.saturating_sub(1) {
@@ -477,6 +510,7 @@ impl Client {
                                     (Menu::Window, 's') => Some(3),
                                     (Menu::Window, 'f') => Some(4),
                                     (Menu::Window, 'g') => Some(5),
+                                    (Menu::Window, 'l') => Some(6),
                                     _ => None,
                                 };
                                 if let Some(idx) = target_idx {
@@ -588,6 +622,12 @@ impl Client {
                         .as_secs();
                     let filename = format!("capture_full_{}.txt", timestamp);
                     let _ = std::fs::write(filename, text);
+                }
+                ServerMessage::ClipboardUpdate { text_b64 } => {
+                    // Forward OSC 52 sequence to the terminal
+                    let osc = format!("\x1b]52;c;{}\x07", text_b64);
+                    let _ = io::Write::write_all(&mut io::stdout(), osc.as_bytes());
+                    let _ = io::Write::flush(&mut io::stdout());
                 }
                 ServerMessage::Shutdown => {
                     return Ok(true);
@@ -875,13 +915,29 @@ impl Client {
                         } else if btn == MouseButton::Left {
                             self.pending_selection = Some((id, rel_y, rel_x));
                             self.selection = None;
-                        } else if btn == MouseButton::Right && !self.clipboard.is_empty() {
-                            let data = self.clipboard.clone().into_bytes();
-                            let _ = self.server_tx.try_send(ClientMessage::Input {
-                                window_id: id,
-                                data,
-                            });
-                            self.clipboard.clear();
+                        } else if btn == MouseButton::Right {
+                            // Try to paste from system clipboard first
+                            let mut pasted = false;
+                            if let Some(ref mut cb) = self.clipboard_manager
+                                && let Ok(text) = cb.get_text()
+                            {
+                                let data = text.into_bytes();
+                                let _ = self.server_tx.try_send(ClientMessage::Input {
+                                    window_id: id,
+                                    data,
+                                });
+                                pasted = true;
+                            }
+
+                            // Fallback to internal clipboard if system clipboard failed
+                            if !pasted && !self.clipboard.is_empty() {
+                                let data = self.clipboard.clone().into_bytes();
+                                let _ = self.server_tx.try_send(ClientMessage::Input {
+                                    window_id: id,
+                                    data,
+                                });
+                                self.clipboard.clear();
+                            }
                         }
                     }
                     HitTarget::WindowScrollbar(id) => {
@@ -1130,16 +1186,31 @@ impl Client {
                         && sel.start != sel.end
                     {
                         let mut text = String::new();
-                        let (r1, c1) = (sel.start.0.min(sel.end.0), sel.start.1.min(sel.end.1));
-                        let (r2, c2) = (sel.start.0.max(sel.end.0), sel.start.1.max(sel.end.1));
-                        let inner_w = win.width.saturating_sub(2) as usize;
+                        let (start_r, start_c) = sel.start;
+                        let (end_r, end_c) = sel.end;
+
+                        // Determine actual start and end (linear order)
+                        let (r1, c1, r2, c2) =
+                            if start_r < end_r || (start_r == end_r && start_c <= end_c) {
+                                (start_r, start_c, end_r, end_c)
+                            } else {
+                                (end_r, end_c, start_r, start_c)
+                            };
+
+                        let inner_w = win.width.saturating_sub(3) as usize;
                         for r in r1..=r2 {
                             let mut line = String::new();
                             for c in 0..inner_w {
                                 let col = c as u16;
-                                if (r == r1 && col < c1) || (r == r2 && col > c2) {
+                                // Skip columns before the start on the first row
+                                if r == r1 && col < c1 {
                                     continue;
                                 }
+                                // Skip columns after the end on the last row
+                                if r == r2 && col > c2 {
+                                    continue;
+                                }
+
                                 let idx = r as usize * inner_w + c;
                                 if let Some(cell) = win.screen.get(idx) {
                                     line.push(cell.ch);
@@ -1150,6 +1221,12 @@ impl Client {
                                 text.push('\n');
                             }
                         }
+                        // Copy to system clipboard
+                        if let Some(ref mut cb) = self.clipboard_manager {
+                            let _ = cb.set_text(text.clone());
+                        }
+                        // Always send OSC 52 for terminal/remote integration
+                        self.send_osc52_copy(&text);
                         self.clipboard = text;
                     }
                     self.selection = None;
@@ -1569,6 +1646,7 @@ pub async fn run_client(stream: TcpStream, initial_layout: Option<String>) -> Re
                                     " Solo (S)         ",
                                     " Fullscreen (F)   ",
                                     " Tile Grid (G)    ",
+                                    " Clear History (L)",
                                 ],
                                 _ => vec![],
                             };

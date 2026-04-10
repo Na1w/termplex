@@ -166,10 +166,8 @@ async fn run_launch_command(
             let decode_res =
                 bincode::serde::decode_from_slice::<ServerMessage, _>(&accum[4..4 + len], config);
 
-            if let Ok((msg, _)) = decode_res {
-                if let ServerMessage::WindowCreatedConfirmation { window_id } = msg {
-                    return Ok(window_id);
-                }
+            if let Ok((ServerMessage::WindowCreatedConfirmation { window_id }, _)) = decode_res {
+                return Ok(window_id);
             }
             accum.drain(0..4 + len);
         }

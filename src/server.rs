@@ -177,13 +177,20 @@ impl ServerState {
             .saturating_sub(inner_height)
             .min(SCROLLBACK_SIZE);
 
+        // Clamp scroll_offset to current scrollback_size
+        let current_scroll_offset = win.scroll_offset.min(scrollback_size);
+
         let total_cells = inner_width * inner_height;
 
         // Get screen content
         let mut screen = Vec::with_capacity(total_cells);
 
         {
-            let parser = win.terminal.parser.lock().unwrap();
+            let mut parser = win.terminal.parser.lock().unwrap();
+            // Ensure parser is in sync with our clamped offset
+            if current_scroll_offset != win.scroll_offset {
+                parser.screen_mut().set_scrollback(current_scroll_offset);
+            }
             let vt_screen = parser.screen();
 
             for row in 0..inner_height {
@@ -247,7 +254,7 @@ impl ServerState {
             focused: win.focused,
             running,
             exit_code,
-            scroll_offset: win.scroll_offset,
+            scroll_offset: current_scroll_offset,
             scrollback_size,
             fullscreen: win.fullscreen,
             screen,
@@ -398,6 +405,7 @@ enum ServerEvent {
     ClientMessage(u64, ClientMessage),
     WindowNeedsUpdate(usize),
     WindowClosed(usize),
+    Osc52Update(usize, String),
 }
 
 fn ansi_to_rgb(idx: u8) -> (u8, u8, u8) {
@@ -567,7 +575,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
             WindowConfig {
                 x: 2,
                 y: 4,
-                width: DEFAULT_TERM_WIDTH + 2,
+                width: DEFAULT_TERM_WIDTH + 3,
                 height: DEFAULT_TERM_HEIGHT + 2,
                 command: None,
                 args: vec![],
@@ -1118,7 +1126,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 win.rect = Rect::new(x, y, actual_w, actual_h);
                                 let _ = win
                                     .terminal
-                                    .resize(actual_h.saturating_sub(2), actual_w.saturating_sub(2));
+                                    .resize(actual_h.saturating_sub(2), actual_w.saturating_sub(3));
                                 let ws = build_window_state(win, &window_order);
                                 win.update_last_state(&ws);
                             }
@@ -1137,6 +1145,33 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         );
                     }
 
+                    ClientMessage::ClearScrollback { window_id } => {
+                        let ws = {
+                            let mut st = state.lock().unwrap();
+                            let window_order = st.window_order.clone();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                win.scroll_offset = 0;
+                                let rows = win.rect.height.saturating_sub(2);
+                                win.terminal
+                                    .total_lines
+                                    .store(rows as usize, Ordering::SeqCst);
+                                {
+                                    let mut parser = win.terminal.parser.lock().unwrap();
+                                    parser.screen_mut().set_scrollback(0);
+                                }
+                                let new_ws = build_window_state(win, &window_order);
+                                win.update_last_state(&new_ws);
+                                Some(new_ws)
+                            } else {
+                                None
+                            }
+                        };
+                        if let Some(ws) = ws {
+                            let msg = ServerMessage::WindowUpdate { window: ws };
+                            broadcast_to_all(&client_writers, &msg);
+                        }
+                    }
+
                     ClientMessage::ResizeWindow {
                         window_id,
                         width,
@@ -1149,7 +1184,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                 let new_rect = Rect::new(win.rect.x, win.rect.y, width, height);
                                 let _ = win
                                     .terminal
-                                    .resize(height.saturating_sub(2), width.saturating_sub(2));
+                                    .resize(height.saturating_sub(2), width.saturating_sub(3));
                                 win.rect = new_rect;
                                 let new_ws = build_window_state(win, &window_order);
                                 win.update_last_state(&new_ws);
@@ -1213,7 +1248,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     if let Some(saved) = win.saved_rect.take() {
                                         let _ = win.terminal.resize(
                                             saved.height.saturating_sub(2),
-                                            saved.width.saturating_sub(2),
+                                            saved.width.saturating_sub(3),
                                         );
                                         win.rect = saved;
                                     }
@@ -1260,7 +1295,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     // Restore to saved size
                                     let _ = win.terminal.resize(
                                         saved.height.saturating_sub(2),
-                                        saved.width.saturating_sub(2),
+                                        saved.width.saturating_sub(3),
                                     );
                                     win.rect = saved;
                                 } else {
@@ -1325,7 +1360,7 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                                     // Resize terminal
                                     let _ = win.terminal.resize(
                                         win.rect.height.saturating_sub(2),
-                                        win.rect.width.saturating_sub(2),
+                                        win.rect.width.saturating_sub(3),
                                     );
                                 }
                                 let new_ws = build_window_state(win, &window_order);
@@ -1461,6 +1496,11 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                         }
                     }
                 }
+            }
+
+            ServerEvent::Osc52Update(_window_id, b64) => {
+                let msg = ServerMessage::ClipboardUpdate { text_b64: b64 };
+                broadcast_to_all(&client_writers, &msg);
             }
 
             ServerEvent::WindowNeedsUpdate(window_id) => {
@@ -1602,6 +1642,9 @@ fn spawn_window(
                 TermEvent::Closed => {
                     let _ = screen_tx.try_send(ServerEvent::WindowClosed(id));
                     break;
+                }
+                TermEvent::Osc52Update(b64) => {
+                    let _ = screen_tx.try_send(ServerEvent::Osc52Update(id, b64));
                 }
             }
         }

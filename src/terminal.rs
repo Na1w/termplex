@@ -13,6 +13,7 @@ use std::sync::mpsc::Sender;
 pub enum TermEvent {
     Update,
     Closed,
+    Osc52Update(String),
 }
 
 pub struct Terminal {
@@ -98,9 +99,33 @@ impl Terminal {
                         }
 
                         // Check for 'Clear Scrollback' sequence: ESC [ 3 J
-                        // This is typically sent by the 'clear' command.
-                        if data.windows(4).any(|w| w == b"\x1b[3J") {
+                        // Some programs might send it with a semicolon: ESC [ ; 3 J
+                        if data.windows(4).any(|w| w == b"\x1b[3J")
+                            || data.windows(5).any(|w| w == b"\x1b[;3J")
+                        {
                             total_lines_clone.store(rows as usize, Ordering::SeqCst);
+                        }
+
+                        // Check for OSC 52: ESC ] 52 ; c ; <base64> BEL (or ST)
+                        if let Some(pos) = data.windows(8).position(|w| w == b"\x1b]52;c;") {
+                            let start = pos + 8;
+                            // Search for terminator BEL (0x07) or ST (ESC \)
+                            let mut end = None;
+                            for i in start..data.len() {
+                                if data[i] == 0x07 {
+                                    end = Some(i);
+                                    break;
+                                }
+                                if i + 1 < data.len() && &data[i..i + 2] == b"\x1b\\" {
+                                    end = Some(i);
+                                    break;
+                                }
+                            }
+                            if let Some(e) = end
+                                && let Ok(b64) = std::str::from_utf8(&data[start..e])
+                            {
+                                let _ = tx.send(TermEvent::Osc52Update(b64.to_string()));
+                            }
                         }
 
                         {

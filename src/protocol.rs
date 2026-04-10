@@ -77,6 +77,9 @@ pub enum ClientMessage {
     /// Auto-tile all non-minimized windows
     TileWindows,
 
+    /// Clear scrollback for a window
+    ClearScrollback { window_id: usize },
+
     /// Capture pane content
     CapturePane { window_id: usize },
 
@@ -240,6 +243,9 @@ pub enum ServerMessage {
 
     /// Full desktop captured content
     FullCaptured { text: String },
+
+    /// OSC 52 Clipboard update (base64)
+    ClipboardUpdate { text_b64: String },
 
     /// Error message
     Error { message: String },
