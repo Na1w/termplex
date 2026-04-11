@@ -25,6 +25,7 @@ pub struct Terminal {
     pub child_pid: u32,
     pub total_lines: Arc<std::sync::atomic::AtomicUsize>,
     pub current_rows: Arc<std::sync::atomic::AtomicUsize>,
+    pub current_cols: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 impl Terminal {
@@ -85,6 +86,8 @@ impl Terminal {
         let total_lines_clone = total_lines.clone();
         let current_rows = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
         let current_rows_clone = current_rows.clone();
+        let current_cols = Arc::new(std::sync::atomic::AtomicUsize::new(cols as usize));
+        let current_cols_clone = current_cols.clone();
 
         let tx = event_tx.clone();
         thread::spawn(move || {
@@ -106,8 +109,12 @@ impl Terminal {
                         if data.windows(4).any(|w| w == b"\x1b[3J")
                             || data.windows(5).any(|w| w == b"\x1b[;3J")
                         {
-                            let current = current_rows_clone.load(Ordering::SeqCst);
-                            total_lines_clone.store(current, Ordering::SeqCst);
+                            let current_r = current_rows_clone.load(Ordering::SeqCst);
+                            let current_c = current_cols_clone.load(Ordering::SeqCst);
+                            total_lines_clone.store(current_r, Ordering::SeqCst);
+                            // Hard reset the parser to clear its internal buffer
+                            let mut p = parser_clone.lock().unwrap();
+                            *p = Parser::new(current_r as u16, current_c as u16, 3000);
                         }
 
                         // Check for OSC 52: ESC ] 52 ; c ; <base64> BEL (or ST)
@@ -166,6 +173,7 @@ impl Terminal {
             child_pid,
             total_lines,
             current_rows,
+            current_cols,
         })
     }
 
@@ -176,15 +184,27 @@ impl Terminal {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
-        self.current_rows.store(rows as usize, Ordering::SeqCst);
+        let old_rows = self.current_rows.swap(rows as usize, Ordering::SeqCst);
+        self.current_cols.store(cols as usize, Ordering::SeqCst);
+
+        // If we were at the bottom (no scrollback), keep it that way by adjusting total_lines
+        let current_total = self.total_lines.load(Ordering::SeqCst);
+        if current_total <= old_rows {
+            self.total_lines.store(rows as usize, Ordering::SeqCst);
+        }
+
+        // Also resize the vt100 parser
+        {
+            let mut p = self.parser.lock().unwrap();
+            p.screen_mut().set_size(rows, cols);
+        }
+
         self.master.resize(PtySize {
             rows,
             cols,
             pixel_width: 0,
             pixel_height: 0,
         })?;
-        let mut p = self.parser.lock().unwrap();
-        p.screen_mut().set_size(rows, cols);
         Ok(())
     }
 

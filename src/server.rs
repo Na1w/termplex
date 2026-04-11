@@ -1152,12 +1152,13 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
                             if let Some(win) = st.windows.get_mut(&window_id) {
                                 win.scroll_offset = 0;
                                 let rows = win.rect.height.saturating_sub(2);
+                                let cols = win.rect.width.saturating_sub(3);
                                 win.terminal
                                     .total_lines
                                     .store(rows as usize, Ordering::SeqCst);
                                 {
                                     let mut parser = win.terminal.parser.lock().unwrap();
-                                    parser.screen_mut().set_scrollback(0);
+                                    *parser = vt100::Parser::new(rows, cols, 3000);
                                 }
                                 let new_ws = build_window_state(win, &window_order);
                                 win.update_last_state(&new_ws);
