@@ -535,9 +535,26 @@ impl Client {
                         return Ok(false);
                     }
 
+                    // Determine if the mouse is over a window or the desktop
+                    let hit = self.get_hit(self.last_mouse_pos.0, self.last_mouse_pos.1);
+                    let is_over_window = matches!(
+                        hit,
+                        HitTarget::WindowContent(_)
+                            | HitTarget::WindowTitle(_)
+                            | HitTarget::WindowBorder(_)
+                            | HitTarget::WindowResize(_)
+                            | HitTarget::CloseButton(_)
+                            | HitTarget::MinimizeButton(_)
+                            | HitTarget::MaximizeButton(_)
+                            | HitTarget::FullscreenButton(_)
+                            | HitTarget::SoloButton(_)
+                            | HitTarget::ResetButton(_)
+                            | HitTarget::WindowScrollbar(_)
+                    );
+
                     // Send keys directly to the active window
                     if let Some(id) = self.active_window_id {
-                        return self.send_key_to_window(id, key);
+                        return self.send_key_to_window(id, key, is_over_window);
                     }
                 }
                 Event::Mouse(mouse) => {
@@ -651,36 +668,57 @@ impl Client {
         Ok(false)
     }
 
-    fn send_key_to_window(&mut self, id: usize, key: KeyEvent) -> Result<bool> {
+    fn send_key_to_window(
+        &mut self,
+        id: usize,
+        key: KeyEvent,
+        is_over_window: bool,
+    ) -> Result<bool> {
         let mut data = Vec::new();
 
-        // Handle scroll keys
-        match (key.modifiers, key.code) {
-            (KeyModifiers::SHIFT, KeyCode::PageUp) => {
-                let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                    window_id: id,
-                    amount: 10,
-                });
-                return Ok(false);
-            }
-            (KeyModifiers::SHIFT, KeyCode::PageDown) => {
-                let _ = self.server_tx.try_send(ClientMessage::Scroll {
-                    window_id: id,
-                    amount: -10,
-                });
-                return Ok(false);
-            }
-            _ => {}
+        let has_alt = key.modifiers.contains(KeyModifiers::ALT);
+        let has_ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let has_shift = key.modifiers.contains(KeyModifiers::SHIFT);
+
+        // 1: none, 2: shift, 3: alt, 4: shift+alt, 5: ctrl, 6: shift+ctrl, 7: alt+ctrl, 8: shift+alt+ctrl
+        let mut modifier_code = 1;
+        if has_shift {
+            modifier_code += 1;
+        }
+        if has_alt {
+            modifier_code += 2;
+        }
+        if has_ctrl {
+            modifier_code += 4;
         }
 
-        // Convert key to bytes
-        if key.modifiers.contains(KeyModifiers::ALT) {
-            data.push(27);
+        // Handle global overrides (only if NOT over a window)
+        if !is_over_window && has_shift {
+            match key.code {
+                KeyCode::PageUp => {
+                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                        window_id: id,
+                        amount: 10,
+                    });
+                    return Ok(false);
+                }
+                KeyCode::PageDown => {
+                    let _ = self.server_tx.try_send(ClientMessage::Scroll {
+                        window_id: id,
+                        amount: -10,
+                    });
+                    return Ok(false);
+                }
+                _ => {}
+            }
         }
 
         match key.code {
             KeyCode::Char(c) => {
-                if key.modifiers.contains(KeyModifiers::CONTROL) {
+                if has_alt {
+                    data.push(27);
+                }
+                if has_ctrl {
                     if c.is_ascii_lowercase() {
                         data.push((c as u8) - b'a' + 1);
                     } else if c.is_ascii_uppercase() {
@@ -704,32 +742,99 @@ impl Client {
                     data.extend_from_slice(c.encode_utf8(&mut buf).as_bytes());
                 }
             }
-            KeyCode::Enter => data.push(b'\r'),
-            KeyCode::Backspace => data.push(127),
-            KeyCode::Tab => data.push(9),
-            KeyCode::Esc => data.push(27),
-            KeyCode::Up => data.extend_from_slice(b"\x1b[A"),
-            KeyCode::Down => data.extend_from_slice(b"\x1b[B"),
-            KeyCode::Right => data.extend_from_slice(b"\x1b[C"),
-            KeyCode::Left => data.extend_from_slice(b"\x1b[D"),
-            KeyCode::Home => data.extend_from_slice(b"\x1b[H"),
-            KeyCode::End => data.extend_from_slice(b"\x1b[F"),
-            KeyCode::Insert => data.extend_from_slice(b"\x1b[2~"),
-            KeyCode::Delete => data.extend_from_slice(b"\x1b[3~"),
-            KeyCode::PageUp => data.extend_from_slice(b"\x1b[5~"),
-            KeyCode::PageDown => data.extend_from_slice(b"\x1b[6~"),
-            KeyCode::F(1) => data.extend_from_slice(b"\x1bOP"),
-            KeyCode::F(2) => data.extend_from_slice(b"\x1bOQ"),
-            KeyCode::F(3) => data.extend_from_slice(b"\x1bOR"),
-            KeyCode::F(4) => data.extend_from_slice(b"\x1bOS"),
-            KeyCode::F(5) => data.extend_from_slice(b"\x1b[15~"),
-            KeyCode::F(6) => data.extend_from_slice(b"\x1b[17~"),
-            KeyCode::F(7) => data.extend_from_slice(b"\x1b[18~"),
-            KeyCode::F(8) => data.extend_from_slice(b"\x1b[19~"),
-            KeyCode::F(9) => data.extend_from_slice(b"\x1b[20~"),
-            KeyCode::F(10) => data.extend_from_slice(b"\x1b[21~"),
-            KeyCode::F(11) => data.extend_from_slice(b"\x1b[23~"),
-            KeyCode::F(12) => data.extend_from_slice(b"\x1b[24~"),
+            KeyCode::Enter => {
+                if has_alt {
+                    data.push(27);
+                }
+                data.push(b'\r');
+            }
+            KeyCode::Backspace => {
+                if has_alt {
+                    data.push(27);
+                }
+                data.push(127);
+            }
+            KeyCode::Tab => {
+                if has_alt {
+                    data.push(27);
+                }
+                data.push(9);
+            }
+            KeyCode::BackTab => {
+                data.extend_from_slice(b"\x1b[Z");
+            }
+            KeyCode::Esc => {
+                data.push(27);
+                if has_alt {
+                    data.push(27);
+                }
+            }
+            KeyCode::Up
+            | KeyCode::Down
+            | KeyCode::Right
+            | KeyCode::Left
+            | KeyCode::Home
+            | KeyCode::End
+            | KeyCode::PageUp
+            | KeyCode::PageDown
+            | KeyCode::Insert
+            | KeyCode::Delete
+            | KeyCode::F(_) => {
+                let code = match key.code {
+                    KeyCode::Up => "A",
+                    KeyCode::Down => "B",
+                    KeyCode::Right => "C",
+                    KeyCode::Left => "D",
+                    KeyCode::Home => "H",
+                    KeyCode::End => "F",
+                    KeyCode::PageUp => "5~",
+                    KeyCode::PageDown => "6~",
+                    KeyCode::Insert => "2~",
+                    KeyCode::Delete => "3~",
+                    KeyCode::F(n) => match n {
+                        1 => "P",
+                        2 => "Q",
+                        3 => "R",
+                        4 => "S",
+                        5 => "15~",
+                        6 => "17~",
+                        7 => "18~",
+                        8 => "19~",
+                        9 => "20~",
+                        10 => "21~",
+                        11 => "23~",
+                        12 => "24~",
+                        _ => "",
+                    },
+                    _ => "",
+                };
+
+                if !code.is_empty() {
+                    data.push(27); // ESC
+                    if (1..=4).contains(&match key.code {
+                        KeyCode::F(n) => n,
+                        _ => 0,
+                    }) && modifier_code == 1
+                    {
+                        data.push(b'O');
+                        data.extend_from_slice(code.as_bytes());
+                    } else if modifier_code > 1 {
+                        data.push(b'[');
+                        if let Some(base) = code.strip_suffix('~') {
+                            data.extend_from_slice(
+                                format!("{};{}~", base, modifier_code).as_bytes(),
+                            );
+                        } else {
+                            data.extend_from_slice(
+                                format!("1;{}{}", modifier_code, code).as_bytes(),
+                            );
+                        }
+                    } else {
+                        data.push(b'[');
+                        data.extend_from_slice(code.as_bytes());
+                    }
+                }
+            }
             _ => {}
         }
 
