@@ -82,7 +82,7 @@ impl Terminal {
         let exit_code = Arc::new(Mutex::new(None));
         let exit_code_clone = exit_code.clone();
 
-        let total_lines = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
+        let total_lines = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let total_lines_clone = total_lines.clone();
         let current_rows = Arc::new(std::sync::atomic::AtomicUsize::new(rows as usize));
         let current_rows_clone = current_rows.clone();
@@ -98,50 +98,50 @@ impl Terminal {
                     Ok(0) => break,
                     Ok(n) => {
                         let data = &byte_buf[..n];
-                        // Count newlines to estimate history size
-                        let newlines = data.iter().filter(|&&b| b == b'\n').count();
-                        if newlines > 0 {
-                            total_lines_clone.fetch_add(newlines, Ordering::SeqCst);
-                        }
-
-                        // Check for 'Clear Scrollback' sequence: ESC [ 3 J
-                        // Some programs might send it with a semicolon: ESC [ ; 3 J
-                        if data.windows(4).any(|w| w == b"\x1b[3J")
-                            || data.windows(5).any(|w| w == b"\x1b[;3J")
                         {
-                            let current_r = current_rows_clone.load(Ordering::SeqCst);
-                            let current_c = current_cols_clone.load(Ordering::SeqCst);
-                            total_lines_clone.store(current_r, Ordering::SeqCst);
-                            // Hard reset the parser to clear its internal buffer
                             let mut p = parser_clone.lock().unwrap();
-                            *p = Parser::new(current_r as u16, current_c as u16, 3000);
-                        }
 
-                        // Check for OSC 52: ESC ] 52 ; c ; <base64> BEL (or ST)
-                        if let Some(pos) = data.windows(8).position(|w| w == b"\x1b]52;c;") {
-                            let start = pos + 8;
-                            // Search for terminator BEL (0x07) or ST (ESC \)
-                            let mut end = None;
-                            for i in start..data.len() {
-                                if data[i] == 0x07 {
-                                    end = Some(i);
-                                    break;
-                                }
-                                if i + 1 < data.len() && &data[i..i + 2] == b"\x1b\\" {
-                                    end = Some(i);
-                                    break;
-                                }
-                            }
-                            if let Some(e) = end
-                                && let Ok(b64) = std::str::from_utf8(&data[start..e])
+                            // 1. Clear Scrollback check
+                            if data.windows(4).any(|w| w == b"\x1b[3J")
+                                || data.windows(5).any(|w| w == b"\x1b[;3J")
                             {
-                                let _ = tx.send(TermEvent::Osc52Update(b64.to_string()));
+                                let current_r = current_rows_clone.load(Ordering::SeqCst);
+                                let current_c = current_cols_clone.load(Ordering::SeqCst);
+                                total_lines_clone.store(0, Ordering::SeqCst);
+                                *p = Parser::new(current_r as u16, current_c as u16, 3000);
                             }
-                        }
 
-                        {
-                            let mut p = parser_clone.lock().unwrap();
+                            // 2. OSC 52 check
+                            if let Some(pos) = data.windows(8).position(|w| w == b"\x1b]52;c;") {
+                                let start = pos + 8;
+                                let mut end = None;
+                                for i in start..data.len() {
+                                    if data[i] == 0x07 {
+                                        end = Some(i);
+                                        break;
+                                    }
+                                    if i + 1 < data.len() && &data[i..i + 2] == b"\x1b\\" {
+                                        end = Some(i);
+                                        break;
+                                    }
+                                }
+                                if let Some(e) = end
+                                    && let Ok(b64) = std::str::from_utf8(&data[start..e])
+                                {
+                                    let _ = tx.send(TermEvent::Osc52Update(b64.to_string()));
+                                }
+                            }
+
+                            // 3. Process data
                             p.process(data);
+
+                            // 4. Update total_lines if NOT in alternate screen
+                            if !p.screen().alternate_screen() {
+                                let newlines = data.iter().filter(|&&b| b == b'\n').count();
+                                if newlines > 0 {
+                                    total_lines_clone.fetch_add(newlines, Ordering::SeqCst);
+                                }
+                            }
                         }
                         let _ = tx.send(TermEvent::Update);
                     }
@@ -184,14 +184,8 @@ impl Terminal {
     }
 
     pub fn resize(&self, rows: u16, cols: u16) -> Result<()> {
-        let old_rows = self.current_rows.swap(rows as usize, Ordering::SeqCst);
+        self.current_rows.store(rows as usize, Ordering::SeqCst);
         self.current_cols.store(cols as usize, Ordering::SeqCst);
-
-        // If we were at the bottom (no scrollback), keep it that way by adjusting total_lines
-        let current_total = self.total_lines.load(Ordering::SeqCst);
-        if current_total <= old_rows {
-            self.total_lines.store(rows as usize, Ordering::SeqCst);
-        }
 
         // Also resize the vt100 parser
         {

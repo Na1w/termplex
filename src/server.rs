@@ -166,102 +166,8 @@ impl ServerState {
 
     fn get_window_state(&self, id: usize) -> Option<WindowState> {
         let win = self.windows.get(&id)?;
-        let running = win.terminal.running.load(Ordering::SeqCst);
-        let exit_code = *win.terminal.exit_code.lock().unwrap();
-
-        let inner_height = win.rect.height.saturating_sub(2) as usize;
-        let inner_width = win.rect.width.saturating_sub(3) as usize;
-
-        let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
-        let scrollback_size = total_lines
-            .saturating_sub(inner_height)
-            .min(SCROLLBACK_SIZE);
-
-        // Clamp scroll_offset to current scrollback_size
-        let current_scroll_offset = win.scroll_offset.min(scrollback_size);
-
-        let total_cells = inner_width * inner_height;
-
-        // Get screen content
-        let mut screen = Vec::with_capacity(total_cells);
-
-        {
-            let mut parser = win.terminal.parser.lock().unwrap();
-            // Ensure parser is in sync with our clamped offset
-            if current_scroll_offset != win.scroll_offset {
-                parser.screen_mut().set_scrollback(current_scroll_offset);
-            }
-            let vt_screen = parser.screen();
-
-            for row in 0..inner_height {
-                for col in 0..inner_width {
-                    if let Some(cell) = vt_screen.cell(row as u16, col as u16) {
-                        let contents = cell.contents();
-                        let ch = contents.chars().next().unwrap_or(' ');
-
-                        let fg = match cell.fgcolor() {
-                            vt100::Color::Rgb(r, g, b) => (r, g, b),
-                            vt100::Color::Idx(i) => ansi_to_rgb(i),
-                            _ => (200, 200, 200),
-                        };
-
-                        let bg = match cell.bgcolor() {
-                            vt100::Color::Rgb(r, g, b) => (r, g, b),
-                            vt100::Color::Idx(i) => ansi_to_rgb(i),
-                            _ => (0, 0, 0),
-                        };
-
-                        screen.push(Cell::new(
-                            ch,
-                            fg,
-                            bg,
-                            cell.bold(),
-                            cell.italic(),
-                            cell.underline(),
-                        ));
-                    } else {
-                        screen.push(Cell::default());
-                    }
-                }
-            }
-        }
-
-        let (cursor_pos, mouse_reporting) = {
-            let parser = win.terminal.parser.lock().unwrap();
-            let s = parser.screen();
-            let (row, col) = s.cursor_position();
-            let pos = Some((row, col));
-            let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
-            (pos, mouse)
-        };
-
-        // Look up z_order from window_order
-        let z_order = self
-            .window_order
-            .iter()
-            .position(|&wid| wid == id)
-            .unwrap_or(0);
-
-        Some(WindowState {
-            id: win.id,
-            title: win.title.clone(),
-            x: win.rect.x,
-            y: win.rect.y,
-            width: win.rect.width,
-            height: win.rect.height,
-            z_order,
-            minimized: win.minimized,
-            focused: win.focused,
-            running,
-            exit_code,
-            scroll_offset: current_scroll_offset,
-            scrollback_size,
-            fullscreen: win.fullscreen,
-            screen,
-            cursor_pos,
-            cursor_visible: !win.minimized && running,
-            mouse_reporting,
-        })
+        let window_order = self.window_order.clone();
+        Some(build_window_state(win, &window_order))
     }
 
     fn get_all_window_states(&self) -> Vec<WindowState> {
@@ -317,10 +223,18 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
     let inner_height = win.rect.height.saturating_sub(2) as usize;
     let inner_width = win.rect.width.saturating_sub(3) as usize;
 
+    let vt_rows = win.terminal.current_rows.load(Ordering::SeqCst);
     let total_lines = win.terminal.total_lines.load(Ordering::SeqCst);
+
+    // scrollback_size is how many rows have actually left the vt_rows area.
+    // We use vt_rows - 1 as baseline because the vt_rows-th newline is what
+    // actually scrolls the first line out of view.
     let scrollback_size = total_lines
-        .saturating_sub(inner_height)
+        .saturating_sub(vt_rows.saturating_sub(1))
         .min(SCROLLBACK_SIZE);
+
+    // Clamp scroll_offset to current scrollback_size
+    let current_scroll_offset = win.scroll_offset.min(scrollback_size);
 
     let total_cells = inner_width * inner_height;
 
@@ -328,12 +242,18 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
     let mut screen = Vec::with_capacity(total_cells);
 
     {
-        let parser = win.terminal.parser.lock().unwrap();
+        let mut parser = win.terminal.parser.lock().unwrap();
+        // vt100's set_scrollback(n) shows rows offset by n from the bottom of terminal
+        parser.screen_mut().set_scrollback(current_scroll_offset);
         let vt_screen = parser.screen();
 
+        // If inner_height < vt_rows, we want to see the BOTTOM part of the terminal view
+        let view_start_row = vt_rows.saturating_sub(inner_height);
+
         for row in 0..inner_height {
+            let actual_row = view_start_row + row;
             for col in 0..inner_width {
-                if let Some(cell) = vt_screen.cell(row as u16, col as u16) {
+                if let Some(cell) = vt_screen.cell(actual_row as u16, col as u16) {
                     let contents = cell.contents();
                     let ch = contents.chars().next().unwrap_or(' ');
 
@@ -368,7 +288,18 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
         let parser = win.terminal.parser.lock().unwrap();
         let s = parser.screen();
         let (row, col) = s.cursor_position();
-        let pos = Some((row, col));
+
+        // If inner_height < vt_rows, we want to see the BOTTOM part of the terminal
+        let view_start_row = vt_rows.saturating_sub(inner_height);
+
+        // Cursor is on row, we need it relative to our window's top-left
+        let rel_row = (row as i32) - (view_start_row as i32);
+        let pos = if rel_row >= 0 && rel_row < inner_height as i32 {
+            Some((rel_row as u16, col))
+        } else {
+            None
+        };
+
         let mouse = running && s.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
         (pos, mouse)
     };
@@ -384,7 +315,7 @@ fn build_window_state(win: &WindowInfo, window_order: &[usize]) -> WindowState {
         focused: win.focused,
         running,
         exit_code,
-        scroll_offset: win.scroll_offset,
+        scroll_offset: current_scroll_offset,
         scrollback_size,
         fullscreen: win.fullscreen,
         screen,
@@ -773,9 +704,18 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                     ClientMessage::CapturePane { window_id } => {
                         let text = {
-                            let st = state.lock().unwrap();
-                            if let Some(win) = st.windows.get(&window_id) {
-                                let parser = win.terminal.parser.lock().unwrap();
+                            let mut st = state.lock().unwrap();
+                            if let Some(win) = st.windows.get_mut(&window_id) {
+                                let mut parser = win.terminal.parser.lock().unwrap();
+                                let vt_rows = win.terminal.current_rows.load(Ordering::SeqCst);
+                                let scrollback_size = win
+                                    .terminal
+                                    .total_lines
+                                    .load(Ordering::SeqCst)
+                                    .saturating_sub(vt_rows.saturating_sub(1))
+                                    .min(SCROLLBACK_SIZE);
+                                let current_scroll_offset = win.scroll_offset.min(scrollback_size);
+                                parser.screen_mut().set_scrollback(current_scroll_offset);
                                 parser.screen().contents()
                             } else {
                                 String::new()
@@ -842,19 +782,32 @@ pub async fn run_server(host: &str, port: u16, layout_path: Option<String>) -> R
 
                                     // Draw content
                                     if !win.minimized {
-                                        let parser = win.terminal.parser.lock().unwrap();
+                                        let mut parser = win.terminal.parser.lock().unwrap();
+                                        let vt_rows =
+                                            win.terminal.current_rows.load(Ordering::SeqCst);
+                                        let total_lines =
+                                            win.terminal.total_lines.load(Ordering::SeqCst);
+                                        let scrollback_size = total_lines
+                                            .saturating_sub(vt_rows.saturating_sub(1))
+                                            .min(SCROLLBACK_SIZE);
+                                        let current_scroll_offset =
+                                            win.scroll_offset.min(scrollback_size);
+                                        parser.screen_mut().set_scrollback(current_scroll_offset);
+
                                         let vt_screen = parser.screen();
                                         let inner_w = win_w.saturating_sub(2);
                                         let inner_h = win_h.saturating_sub(2);
+                                        let view_start_row = vt_rows.saturating_sub(inner_h);
 
                                         for row in 0..inner_h {
                                             for col in 0..inner_w {
                                                 let gx = r.x as usize + 1 + col;
                                                 let gy = r.y as usize + 1 + row;
+                                                let actual_row = view_start_row + row;
                                                 if gx < width
                                                     && gy < height
-                                                    && let Some(cell) =
-                                                        vt_screen.cell(row as u16, col as u16)
+                                                    && let Some(cell) = vt_screen
+                                                        .cell(actual_row as u16, col as u16)
                                                 {
                                                     grid[gy][gx] = cell
                                                         .contents()
